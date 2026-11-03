@@ -1,23 +1,23 @@
 services:
   bot:
-    build:
-      context: .
-      dockerfile: Dockerfile.standalone
-    image: discord-github-sync-bot
-    container_name: discord-github-sync-bot
+    build: .
+    image: github-discord-issues-sync:local
     restart: unless-stopped
-    user: botuser
+    init: true
     env_file: .env
+    environment:
+      PORT: "5000"
+      DATA_DIR: /app/data
     ports:
-      - "${PORT:-5000}:${PORT:-5000}"
+      - "127.0.0.1:${PORT:-5000}:5000"
     volumes:
       - bot-data:/app/data
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:${PORT:-5000}/health"]
-      interval: 30s
-      timeout: 5s
-      start_period: 40s
-      retries: 3
+    stop_grace_period: 35s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   bot-data:

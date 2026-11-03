@@ -1,340 +1,158 @@
-# discord-github-sync-bot
+# GitHub Issues ↔ Discord forum sync
 
-> Let your Discord community report bugs and request features — without ever touching GitHub.
+A self-hosted bridge for one GitHub repository and one Discord forum channel. Run one bot instance on your homeserver with Docker Compose. Based on [Sillhouette/discord-github-sync-bot](https://github.com/Sillhouette/discord-github-sync-bot), originally by [holmityd](https://github.com/holmityd/GitHub-Issues-Discord-Threads-Bot). MIT licensed; original credits retained in LICENSE.
 
-Bidirectional sync between Discord forum threads and GitHub issues.
-Built for Discord-native communities: gaming studios, creator tools, indie projects.
+This fork replaces the upstream in-memory sync runtime with a SQLite-backed engine while retaining TypeScript, discord.js, Octokit, Express, webhook signature verification, and the R2 uploader.
 
----
+## What syncs
 
-## How it works
+- New GitHub issues create forum posts. Human-created forum posts create GitHub issues.
+- Replies sync both ways with attribution and source links. Bot/webhook-authored Discord messages are excluded to prevent loops.
+- GitHub title, body, labels, lock state, and open/closed state update the Discord thread and a bot-owned summary. Matching label names become forum tags (at most five).
+- For a Discord-origin issue, editing the original Discord starter updates its GitHub body. Other issue metadata is managed on GitHub after creation; later Discord title/tag changes are not sent upstream.
+- Discord-origin replies are editable from Discord; GitHub-origin replies are editable from GitHub. Editing the mirrored copy does not change its source.
+- Long GitHub content is split across messages with a source link in every part. Shortened content leaves a placeholder in obsolete parts.
+- Deleted source comments/messages become a deletion notice in their mirrors. Deleting an entire thread or issue **disables its mapping**; it does not delete the other side or recreate the deleted object.
+- All outbound Discord messages disable mentions, including edits.
 
-```
-Discord Forum Thread  ←→  Bot (Node.js)  ←→  GitHub Issues
-      ↑                         ↑
- your community            webhook server
- (no GitHub needed)          port :5000
-```
+**Archiving is not issue closure.** Discord automatically archives inactive posts. This never closes or reopens a GitHub issue. Use the commands below for deliberate status changes.
 
-Users post in a Discord forum channel. The bot automatically creates a GitHub issue.
-From that point on, everything stays in sync — comments, status changes, and labels
-flow in both directions. Your community never needs to visit GitHub.
+## Homeserver setup
 
----
+### 1. Create a Discord bot and a dedicated forum
 
-## Features
+In the [Discord Developer Portal](https://discord.com/developers/applications), create an application and bot, copy its token, and enable **Message Content Intent**. Invite it using the `bot` and `applications.commands` scopes.
 
-- **Discord → GitHub:** New forum thread creates a GitHub issue
-- **GitHub → Discord:** Comments and status changes posted back to the Discord thread
-- **Bidirectional comments:** Replies sync in both directions
-- **Status sync:** Closing/reopening an issue archives/unarchives the Discord thread
-- **Tag → label mapping:** Discord forum tags map to GitHub issue labels
-- **Webhook signature verification:** HMAC-SHA256 verification (recommended for production)
-- **R2 image re-hosting:** Prevents Discord CDN image expiry in GitHub issues (optional)
+Give the bot these permissions in your forum:
 
----
+- View Channel
+- Send Messages (needed to create forum posts)
+- Send Messages in Threads
+- Read Message History
+- Manage Threads
 
-## Prerequisites
+It does not need Administrator, Manage Messages, Manage Webhooks, Presence Intent, or Members Intent. Permissions and the forum type are checked at startup. Use a forum without a required-tag policy, or ensure every mirrored issue has a label matching an available forum tag. Obtain the forum channel ID using Discord Developer Mode.
 
-Before you start, you need three things:
+Everything humans write in this forum is eligible for copying to GitHub. Choose the repository and forum audience accordingly.
 
-1. **A server to run the bot on** — a VPS, home server, or any machine with a public IP.
-   The bot needs to be reachable from the internet so GitHub can send it webhook events.
-   For local testing, a tunnel tool like [ngrok](https://ngrok.com) works fine.
+### 2. Create GitHub credentials
 
-2. **A Discord bot token** — created in the Discord Developer Portal (step-by-step below).
+Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) scoped to the target repository, with **Issues: read and write** and the default Metadata access. Approve the token in your organization if required. Track its expiration and rotate it in `.env` before it expires.
 
-3. **A GitHub fine-grained personal access token** — for creating and updating issues (step-by-step below).
+This version uses a PAT, not a GitHub App. GitHub issues/comments appear under the PAT account, with the Discord author credited in the body. Pull requests are excluded.
 
----
+### 3. Configure and start
 
-## Setup
-
-### Step 1 — Create your Discord bot
-
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) and click **New Application**.
-2. Give it a name (e.g. `Issue Tracker`) and click **Create**.
-3. In the left sidebar, click **Bot**.
-4. Click **Add Bot** → **Yes, do it!**
-5. Under **Token**, click **Reset Token** and copy the token. **Save this — you won't see it again.**
-6. Scroll down to **Privileged Gateway Intents** and enable:
-   - **Message Content Intent**
-7. In the left sidebar, click **OAuth2** → **URL Generator**.
-8. Under **Scopes**, check: `bot`
-9. Under **Bot Permissions**, check:
-   - Send Messages
-   - Manage Threads
-   - Manage Messages
-   - Read Message History
-10. Copy the generated URL at the bottom, open it in your browser, and invite the bot to your server.
-
----
-
-### Step 2 — Create a Discord forum channel
-
-The bot listens to a **Forum** channel (not a regular text channel).
-
-1. In your Discord server, click **+** next to a category to add a channel.
-2. Select **Forum** as the channel type.
-3. Name it something like `#bug-reports` or `#feedback`.
-4. **Get the channel ID:** Enable Developer Mode first if you haven't — go to
-   User Settings → App Settings → Advanced → Developer Mode (toggle on).
-   Then right-click your forum channel → **Copy Channel ID**.
-
----
-
-### Step 3 — Create a GitHub personal access token
-
-1. Go to [GitHub Settings → Personal Access Tokens (fine-grained)](https://github.com/settings/tokens?type=beta).
-2. Click **Generate new token**.
-3. Set a name (e.g. `discord-bot`) and expiration (90 days recommended — set a reminder to rotate).
-4. Under **Repository access**, choose **Only select repositories** and pick your target repo.
-5. Under **Repository permissions**, set:
-   - **Issues**: Read and write
-   - **Metadata**: Read-only (selected automatically)
-6. Click **Generate token** and copy it. **Save this — you won't see it again.**
-
----
-
-### Step 4 — Configure the bot
-
-Clone the repo and create your `.env`:
-
-```bash
-git clone https://github.com/Sillhouette/discord-github-sync-bot.git
+```sh
+git clone https://github.com/snick-m/discord-github-sync-bot.git
 cd discord-github-sync-bot
 cp .env.example .env
+chmod 600 .env
 ```
 
-Open `.env` and fill in the required values:
+Fill in the six required values in `.env`: `DISCORD_TOKEN`, `DISCORD_CHANNEL_ID`, `GITHUB_ACCESS_TOKEN`, `GITHUB_USERNAME`, `GITHUB_REPOSITORY`, and `GITHUB_WEBHOOK_SECRET`. `GITHUB_USERNAME` is the repository owner (user or organization); `GITHUB_REPOSITORY` is its name without the owner.
 
-```bash
-DISCORD_TOKEN=        # from Step 1
-DISCORD_CHANNEL_ID=   # from Step 2
-GITHUB_ACCESS_TOKEN=  # from Step 3
-GITHUB_USERNAME=      # GitHub username or org that owns the repo (e.g. myorg)
-GITHUB_REPOSITORY=    # Repository name only, no owner prefix (e.g. my-game)
+Choose a random webhook secret, for example by running `openssl rand -hex 32`, and enter that value in both `.env` and GitHub. Never commit `.env` or put secrets in webhook URLs.
+
+Defaults import items created from the first start onward. Set `BACKFILL=open` before starting to also import existing open issues and active human-created forum posts. That can create many objects; use a dedicated forum. Items created during later downtime are recovered even with `BACKFILL=none`.
+
+```sh
+docker compose up -d --build
+docker compose logs -f bot
+curl --fail http://127.0.0.1:5000/health
 ```
 
-See the full [Configuration reference](#configuration) below for all options.
+Wait for `Ready: owner/repository ↔ forum ...`. Health returns 503 until Discord connects and startup checks finish. SQLite lives in the named `bot-data` volume. **Do not use `docker compose down -v` unless you intend to erase mappings and pending jobs.** Run only one bot instance against a database.
 
----
+### 4. Expose the GitHub webhook
 
-### Step 5 — Run the bot
+The bot is published only on `127.0.0.1:5000` by default. Use an existing HTTPS reverse proxy or a Cloudflare Tunnel running on the host, forwarding to `http://127.0.0.1:5000`. If your tunnel/proxy is another container, join the same Docker network and use `http://bot:5000` instead of localhost.
 
-**With Docker Compose (easiest):**
+The bot process runs on your server; a tunnel does not run it inside a Cloudflare Worker. Forward only `/github-webhook` if your proxy supports path restrictions.
 
-```bash
-docker compose up -d
+In the target GitHub repository, go to **Settings → Webhooks → Add webhook**:
+
+- Payload URL: `https://your-bot-domain.example/github-webhook`
+- Content type: `application/json`
+- Secret: the exact `GITHUB_WEBHOOK_SECRET` value
+- Individual events: **Issues** and **Issue comments**
+- Keep SSL verification enabled.
+
+A successful ping returns HTTP 200. Valid issue deliveries return 202 after they have been committed to SQLite. Root POST `/` remains a compatibility alias.
+
+### 5. Smoke-test your installation
+
+1. Create a GitHub issue. Check that one Discord post appears with its source link.
+2. Reply on each side and verify the replies arrive once. Edit each original reply and verify its mirror updates.
+3. Create a forum post and verify one GitHub issue appears.
+4. Restart the bot with `docker compose restart bot`, then add another reply on each side. Verify the existing mappings still work.
+5. Archive a thread manually. Its GitHub issue must remain open.
+6. Close and reopen through `/issue` and GitHub. Verify the summary and archived state update.
+
+These live checks require real credentials. Automated tests use fakes and do not post to either service.
+
+## Commands
+
+The bot registers a guild-scoped `/issue` command automatically:
+
+- `/issue status` — show the linked issue.
+- `/issue close` — close it on GitHub and archive its thread.
+- `/issue reopen` — reopen it.
+
+Inside a synced thread, the issue is inferred. Supply `number:123` from another channel in the same server when the thread is archived. You must have access to the forum. Close/reopen additionally require **Manage Threads in the forum**, or one of the comma-separated `MANAGER_ROLE_IDS`. The command acknowledges a durable job; API failures are retried and visible in logs/queue status.
+
+## Reliability and operations
+
+The engine runs one durable job at a time. Webhook delivery IDs are deduplicated; message mappings and content hashes suppress echoes. Source markers and bot-authored message history let retries recover remote writes whose responses were lost. Cross-service writes cannot be a single transaction, so this is recoverable synchronization, not a distributed exactly-once guarantee.
+
+A recovery scan runs on startup, after a resumed Discord connection, and every `RECONCILE_SECONDS` (default 300, minimum 60). It scans updated GitHub issues, all mapped issues/comments, and active/archived forum posts and their message histories. This recovers missed creates, edits, and deletions. It is intended for a modest-volume single repo/forum; large archives require incremental history indexing before scaling up.
+
+Failed jobs retry with exponential backoff and respect GitHub rate-limit headers. After ten failures, a job is retained as failed and other work can proceed. Fix the underlying permission/configuration/API problem, then retry it:
+
+```sh
+docker compose exec bot node dist/queue.js status
+docker compose exec bot node dist/queue.js retry JOB_ID
+docker compose exec bot node dist/queue.js retry all
 ```
 
-**Or with plain Docker:**
+`GET /health` reports Discord readiness, pending/failed job counts, and maximum attempts. Docker health status alone does not restart an unhealthy container; process exits are restarted by Compose. Monitor logs and failed jobs. HTTP 404 on a mapped issue/thread disables the mapping to avoid unwanted recreation; transient network errors and 403s are retried.
 
-```bash
-docker build -f Dockerfile.standalone -t discord-github-sync-bot .
-docker run -d \
-  --name discord-github-sync-bot \
-  --restart unless-stopped \
-  --env-file .env \
-  -p 5000:5000 \
-  -v discord-bot-data:/app/data \
-  discord-github-sync-bot
+Back up the SQLite volume while the bot is stopped, including the database, `-wal`, and `-shm` files if present:
+
+```sh
+docker compose stop bot
+# Use your normal Docker volume backup procedure for this project's bot-data volume.
+docker compose start bot
 ```
 
-**Check it started:**
+The database is bound to its repository/forum configuration. For a different pairing, use a separate Compose project and volume. Existing upstream `commentMap.json` data is not automatically migrated; this fork is designed for a fresh installation. Old upstream deployment scripts/docs under `docs/` are historical, not instructions for this runtime.
 
-```bash
-docker logs discord-github-sync-bot
+To update:
+
+```sh
+git pull --ff-only
+docker compose up -d --build
 ```
 
-You should see the bot connect to Discord without errors.
+Back up before upgrading or rolling back. Keep the previous Git commit/image until the new version passes your smoke tests.
 
----
+## Attachments
 
-### Step 6 — Add the GitHub webhook
+Without optional R2 configuration, copied Discord attachment URLs can expire. Set all four R2 variables in `.env` to rehost files in your bucket with a public HTTPS base URL. Use a Cloudflare API token authorized for uploading objects to that bucket. Rehosted files are capped at 20 MiB each; oversized files fail their job rather than silently disappearing. R2 storage/API usage is separate from hosting the bot.
 
-The bot needs to receive events from GitHub when issues are commented on or closed.
+Deleting a source message does not remove an already rehosted object; manage storage retention separately. Signed links to private GitHub attachments may also expire or be inaccessible in Discord.
 
-> **Do this after the bot is running and reachable from the internet.**
-> If you're testing locally, use a tunnel: `ssh -R 80:localhost:5000 serveo.net`
-> (free, no install) or [ngrok](https://ngrok.com).
+## Local development
 
-1. Go to your GitHub repository → **Settings** → **Webhooks** → **Add webhook**.
-2. **Payload URL:** `https://<your-domain-or-ip>/github-webhook`
-3. **Content type:** `application/json`
-4. **Secret:** If you set `GITHUB_WEBHOOK_SECRET` in your `.env`, paste the same value here. Otherwise leave blank.
-5. **Which events?** → Select **Let me select individual events**, then check:
-   - ✅ Issues
-   - ✅ Issue comments
-6. Make sure **Active** is checked.
-7. Click **Add webhook**.
+Requires Node.js 24+ (built-in SQLite) and pnpm 8.6.3.
 
-GitHub will send a ping — the bot will respond with `200 OK`. You'll see a green checkmark on the webhook page.
-
----
-
-### Step 7 — Test it
-
-1. Create a new post in your Discord forum channel.
-2. Within a few seconds, a GitHub issue should appear in your repository.
-3. Comment on the GitHub issue — the comment should appear in the Discord thread.
-4. Close the GitHub issue — the Discord thread should be archived.
-
----
-
-## Configuration
-
-All configuration is via environment variables in your `.env` file.
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `DISCORD_TOKEN` | **Required** | — | Discord bot token from the Developer Portal |
-| `DISCORD_CHANNEL_ID` | **Required** | — | ID of the Discord forum channel to sync |
-| `GITHUB_ACCESS_TOKEN` | **Required** | — | Fine-grained PAT with Issues: Read & Write |
-| `GITHUB_USERNAME` | **Required** | — | GitHub account or org that owns the repository |
-| `GITHUB_REPOSITORY` | **Required** | — | Repository name only (without owner prefix) |
-| `PORT` | Optional | `5000` | Port the webhook HTTP server listens on |
-| `GITHUB_WEBHOOK_SECRET` | Recommended | — | HMAC secret for webhook signature verification. Without it, the bot logs a warning and accepts all incoming requests. |
-| `R2_BUCKET` | Optional | — | Cloudflare R2 bucket name for image re-hosting |
-| `R2_CDN_BASE_URL` | Optional | — | Public CDN base URL for re-hosted images (e.g. `https://cdn.example.com`) |
-| `CLOUDFLARE_ACCOUNT_ID` | Optional | — | Cloudflare account ID (required if using R2) |
-| `CLOUDFLARE_API_TOKEN` | Optional | — | Cloudflare API token (required if using R2) |
-
----
-
-## Optional Features
-
-### Webhook Signature Verification
-
-Without a webhook secret, anyone who discovers your bot's URL can send fake GitHub events.
-Easy to prevent — takes 30 seconds.
-
-1. Generate a secret:
-   ```bash
-   openssl rand -hex 32
-   ```
-2. Add it to your `.env`:
-   ```
-   GITHUB_WEBHOOK_SECRET=<the value you generated>
-   ```
-3. Add the **same value** to GitHub → your repo → Settings → Webhooks → edit webhook → Secret field.
-4. Restart the bot.
-
-Without this set, the bot prints a warning at startup and accepts all requests.
-
----
-
-### R2 Image Re-hosting
-
-Discord CDN URLs expire after ~7 days. Without re-hosting, images attached to Discord posts
-will break in GitHub issues after that window.
-
-To enable, set all four variables in your `.env`:
-
-```bash
-R2_BUCKET=your-bucket-name
-R2_CDN_BASE_URL=https://cdn.yourdomain.com
-CLOUDFLARE_ACCOUNT_ID=your-account-id
-CLOUDFLARE_API_TOKEN=your-api-token
-```
-
-Without these set, Discord attachment URLs are used as-is and may expire.
-
----
-
-## Deployment
-
-### Docker Compose (recommended)
-
-```bash
-docker compose up -d        # start
-docker compose down         # stop
-docker compose logs -f      # stream logs
-docker compose pull && docker compose up -d  # update
-```
-
-### Plain Docker
-
-```bash
-# Build
-docker build -f Dockerfile.standalone -t discord-github-sync-bot .
-
-# Run
-docker run -d \
-  --name discord-github-sync-bot \
-  --restart unless-stopped \
-  --env-file .env \
-  -p 5000:5000 \
-  -v discord-bot-data:/app/data \
-  discord-github-sync-bot
-
-# Logs
-docker logs discord-github-sync-bot -f
-
-# Stop
-docker stop discord-github-sync-bot
-
-# Update
-docker pull discord-github-sync-bot
-docker stop discord-github-sync-bot && docker rm discord-github-sync-bot
-# re-run the docker run command above
-```
-
-### Bare Node.js
-
-Requires Node.js 20+ and pnpm.
-
-```bash
-pnpm install
+```sh
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm test
 pnpm build
-node dist/index.js
+pnpm smoke
+pnpm dev
 ```
 
-All env vars must be set in your environment or a `.env` file in the working directory.
-
----
-
-## Troubleshooting
-
-**The bot connected to Discord but no GitHub issue is created when I post**
-- Check that `DISCORD_CHANNEL_ID` matches the forum channel (not a text channel).
-- Make sure the channel is a **Forum** type, not a regular text channel.
-- Check the bot has permissions: Send Messages, Manage Threads, Read Message History.
-
-**GitHub webhook shows a red ✗ (failed delivery)**
-- Make sure the bot is running and the port is publicly reachable.
-- Test connectivity: `curl https://<your-domain>/health` should return `{"status":"ok"}`.
-- If you set `GITHUB_WEBHOOK_SECRET`, confirm the exact same value is in both `.env` and the GitHub webhook Secret field.
-
-**Comments from GitHub aren't appearing in Discord**
-- Confirm the webhook is configured with both **Issues** and **Issue comments** event types.
-- Check `docker logs discord-github-sync-bot` for errors.
-
-**Images in GitHub issues are broken**
-- Discord CDN URLs expire after ~7 days. Enable [R2 image re-hosting](#r2-image-re-hosting) to fix this permanently.
-
-**Bot says "Missing required environment variables" on startup**
-- One or more required vars in your `.env` are empty or missing. The error message names which ones.
-
----
-
-## Development
-
-```bash
-pnpm install
-pnpm dev          # watch mode (tsx)
-pnpm test         # run tests (vitest)
-pnpm test:watch   # interactive test mode
-pnpm build        # compile TypeScript → dist/
-```
-
-Tests live next to the source files they test (`*.test.ts`).
-
----
-
-## License & Credits
-
-MIT — see [LICENSE](LICENSE).
-
-Originally based on [holmityd/GitHub-Issues-Discord-Threads-Bot](https://github.com/holmityd/GitHub-Issues-Discord-Threads-Bot) by Nicat (holmityd).
-Forked, extended, and maintained by [Austin Melchior (Sillhouette)](https://github.com/Sillhouette).
+Tests cover lost API responses, restart persistence, bidirectional edits, echo prevention, long messages, safe deletion behavior, recovery imports, signed webhook intake, durable retries, and configuration validation. CI runs type checking, tests, the build, a Docker build, and credential-free startup smoke checks.

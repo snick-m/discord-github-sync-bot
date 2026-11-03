@@ -21,14 +21,24 @@ describe("uploadToR2", () => {
 
   it("should upload to R2 and return the CDN URL on success", async () => {
     // Arrange
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, statusText: "OK" });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+    });
     const buffer = Buffer.from("hello");
 
     // Act
-    const result = await uploadToR2("bot-uploads/discord/msg1/img.png", buffer, "image/png");
+    const result = await uploadToR2(
+      "bot-uploads/discord/msg1/img.png",
+      buffer,
+      "image/png",
+    );
 
     // Assert — CDN URL uses R2_CDN_BASE_URL env var, bucket from R2_BUCKET env var
-    expect(result).toBe("https://cdn.example.com/bot-uploads/discord/msg1/img.png");
+    expect(result).toBe(
+      "https://cdn.example.com/bot-uploads/discord/msg1/img.png",
+    );
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining("/r2/buckets/test-bucket/objects/"),
       expect.objectContaining({
@@ -37,7 +47,7 @@ describe("uploadToR2", () => {
           Authorization: "Bearer test-token",
           "Content-Type": "image/png",
         }),
-        body: buffer,
+        body: new Uint8Array(buffer),
       }),
     );
   });
@@ -51,7 +61,11 @@ describe("uploadToR2", () => {
 
     try {
       // Act — getCredentials() reads env at call time, so no module reset needed
-      const result = await uploadToR2("some/key", Buffer.from("x"), "text/plain");
+      const result = await uploadToR2(
+        "some/key",
+        Buffer.from("x"),
+        "text/plain",
+      );
 
       // Assert
       expect(result).toBeNull();
@@ -69,7 +83,11 @@ describe("uploadToR2", () => {
 
     try {
       // Act
-      const result = await uploadToR2("some/key", Buffer.from("x"), "text/plain");
+      const result = await uploadToR2(
+        "some/key",
+        Buffer.from("x"),
+        "text/plain",
+      );
 
       // Assert — missing bucket = cannot upload, degrade gracefully
       expect(result).toBeNull();
@@ -86,7 +104,11 @@ describe("uploadToR2", () => {
 
     try {
       // Act
-      const result = await uploadToR2("some/key", Buffer.from("x"), "text/plain");
+      const result = await uploadToR2(
+        "some/key",
+        Buffer.from("x"),
+        "text/plain",
+      );
 
       // Assert — missing CDN URL = cannot build return URL, degrade gracefully
       expect(result).toBeNull();
@@ -98,7 +120,11 @@ describe("uploadToR2", () => {
 
   it("should encode each path segment individually, preserving slashes", async () => {
     // Arrange — filename with a space, which Discord allows
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, statusText: "OK" });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+    });
     const key = "bot-uploads/discord/msg1/My Screenshot.png";
 
     // Act
@@ -115,7 +141,11 @@ describe("uploadToR2", () => {
 
   it("should throw when the API returns a non-ok response", async () => {
     // Arrange
-    mockFetch.mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" });
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      statusText: "Forbidden",
+    });
 
     // Act & Assert
     await expect(

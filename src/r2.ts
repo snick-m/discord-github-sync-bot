@@ -56,7 +56,8 @@ export async function uploadToR2(
       Authorization: `Bearer ${apiToken}`,
       "Content-Type": contentType,
     },
-    body: buffer,
+    body: new Uint8Array(buffer),
+    signal: AbortSignal.timeout(30_000),
   });
 
   if (!res.ok) {
