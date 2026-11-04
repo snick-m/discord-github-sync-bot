@@ -322,7 +322,7 @@ export class GitHubAccounts implements Authorship {
         this.store.db.exec("ROLLBACK");
         throw error;
       }
-      return { login: identity.login };
+      return { login: identity.login, discord: attempt.discord };
     } catch {
       this.removeAttempt(attempt.id);
       throw new Error(

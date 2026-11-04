@@ -16,6 +16,7 @@ type Options = {
   repo: string;
   forum: string;
   readToken: () => Promise<string>;
+  repositoryId?: number;
   invalidateReadToken?: () => void;
 };
 
@@ -62,7 +63,12 @@ export class LivePlatforms implements Platforms {
     if (absent.length)
       throw new Error(`Missing forum permissions: ${absent.join(", ")}`);
     // Fail before accepting work if repository access is misconfigured.
-    await this.github.repos.get(this.repo);
+    const repository = await this.github.repos.get(this.repo);
+    if (
+      this.options.repositoryId &&
+      repository.data.id !== this.options.repositoryId
+    )
+      throw new Error("Repository identity changed. Re-approve this mapping.");
   }
   get guildId() {
     return this.forum.guildId;
@@ -155,6 +161,15 @@ export class LivePlatforms implements Platforms {
       request: { timeout: 30_000 },
     });
     try {
+      if (this.options.repositoryId) {
+        const repository = await api.repos.get(this.repo);
+        if (repository.data.id !== this.options.repositoryId)
+          throw new WriteBlocked(
+            discordId,
+            "permission",
+            "The repository identity changed. This write was not sent.",
+          );
+      }
       return await operation(api, writer);
     } catch (error) {
       const status = (error as { status?: number }).status;

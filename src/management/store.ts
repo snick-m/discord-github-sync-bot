@@ -21,6 +21,10 @@ export interface Mapping {
   enabled: boolean;
   roles: string[];
   file?: string;
+  installation?: number;
+  repositoryId?: number;
+  guildId?: string;
+  createdBy?: string;
 }
 export class ManagementStore {
   readonly db: DatabaseSync;
@@ -30,6 +34,7 @@ export class ManagementStore {
     this.db = new DatabaseSync(path.join(directory, "management.sqlite"));
     this.db
       .exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
+      CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,mapping TEXT,repository TEXT,guild TEXT,installation INTEGER,repositoryId INTEGER);
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS vault(id TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS mappings(id TEXT PRIMARY KEY,repository TEXT UNIQUE NOT NULL,channel TEXT UNIQUE NOT NULL,data TEXT NOT NULL);
@@ -123,6 +128,27 @@ export class ManagementStore {
         mapping.channel,
         JSON.stringify(mapping),
       );
+  }
+  audit(actor: string, action: string, mapping?: Mapping) {
+    this.db
+      .prepare(
+        "INSERT INTO audit(at,actor,action,mapping,repository,guild,installation,repositoryId) VALUES (?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        Date.now(),
+        actor,
+        action,
+        mapping?.id ?? null,
+        mapping ? `${mapping.owner}/${mapping.repo}` : null,
+        mapping?.guildId ?? null,
+        mapping?.installation ?? null,
+        mapping?.repositoryId ?? null,
+      );
+  }
+  activity() {
+    return this.db
+      .prepare("SELECT * FROM audit ORDER BY id DESC LIMIT 100")
+      .all();
   }
   hasAdmin() {
     return Boolean(this.get("admin"));

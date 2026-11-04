@@ -155,6 +155,20 @@ describe("GitHub App installation access", () => {
       true,
     );
   });
+  it("pins read tokens to numeric repository and installation IDs", async () => {
+    const { service, api } = setup();
+    await service.configure("123", key);
+    await service.repositoryToken("org", "one", 11, 1);
+    expect(api.mock.calls.find((c) => c[0] === "POST")?.[3]).toEqual({
+      permissions: { issues: "read", metadata: "read" },
+      repository_ids: [11],
+    });
+    const before = api.mock.calls.filter((c) => c[0] === "POST").length;
+    await expect(service.repositoryToken("org", "one", 11, 2)).rejects.toThrow(
+      "installation changed",
+    );
+    expect(api.mock.calls.filter((c) => c[0] === "POST")).toHaveLength(before);
+  });
   it("discovers only issue-enabled repositories belonging to the selected installation", async () => {
     const { service, api } = setup();
     await service.configure("123", key);

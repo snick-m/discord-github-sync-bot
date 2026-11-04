@@ -1,0 +1,9 @@
+# Dashboard direction
+
+Use a compact routing console: a dark, narrow navigation rail, warm neutral workspace, fine dividers, restrained orange accents, and monospace identifiers. Start with the route list and a single New mapping action. No hero, slogan, statistic tiles, or explanatory paragraphs above the work.
+
+User navigation: Mappings and Accounts. Admin navigation: Mappings, Connections, Members, and Activity. Connections use compact status rows and expandable credential forms. Mapping creation uses a focused dialog: repository, server, forum, import option, then a source/destination review. Empty states offer one relevant action. Errors stay next to the affected operation. Tables become labeled rows on phones; keyboard focus and dialog behavior remain accessible.
+
+The user dashboard uses a separate Discord-authenticated session. It never grants administrator access. Only people with repository Admin access plus Discord Manage Server and forum visibility may create or mutate a mapping. Every mutation rechecks both providers. Repository discovery uses the linked user's accessible installations, not the app-wide installation inventory. The app must have access to the repository and the bot must have all required forum permissions. Mappings are organizational resources rather than private property of their creator; any user meeting both checks can manage them.
+
+The GitHub account review takes place in the dashboard after its OAuth callback. Discord sign-in supplies proof of the Discord identity, so dashboard users need no additional slash command. Existing Discord-initiated linking still confirms in Discord. Global credentials and operations remain exclusive to /admin. Mapping changes are recorded in an audit log with numeric actor, repository, guild, and installation IDs.

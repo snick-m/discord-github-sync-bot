@@ -184,14 +184,22 @@ export class GitHubInstallations {
     this.pending.set(cacheKey, pending);
     return pending;
   }
-  private mint(installation: number, repositories?: string[]) {
+  private mint(
+    installation: number,
+    repositories?: string[],
+    repositoryIds?: number[],
+  ) {
     return this.api(
       "POST",
       `/app/installations/${installation}/access_tokens`,
       this.appJwt(),
       {
         permissions: { issues: "read", metadata: "read" },
-        ...(repositories ? { repositories } : {}),
+        ...(repositoryIds
+          ? { repository_ids: repositoryIds }
+          : repositories
+            ? { repositories }
+            : {}),
       },
     );
   }
@@ -238,8 +246,13 @@ export class GitHubInstallations {
     }
     return result;
   }
-  repositoryToken(owner: string, repo: string) {
-    const key = `repo:${owner.toLowerCase()}/${repo.toLowerCase()}`;
+  repositoryToken(
+    owner: string,
+    repo: string,
+    repositoryId?: number,
+    installationId?: number,
+  ) {
+    const key = `repo:${owner.toLowerCase()}/${repo.toLowerCase()}:${repositoryId ?? ""}:${installationId ?? ""}`;
     return this.cached(key, async () => {
       const installation = await this.api(
         "GET",
@@ -248,15 +261,23 @@ export class GitHubInstallations {
       );
       if (installation.suspended_at)
         throw new Error("The GitHub App installation is suspended.");
-      return this.mint(installation.id, [repo]);
+      if (installationId && installation.id !== installationId)
+        throw new Error(
+          "The repository installation changed. Re-approve this mapping.",
+        );
+      return this.mint(
+        installation.id,
+        repositoryId ? undefined : [repo],
+        repositoryId ? [repositoryId] : undefined,
+      );
     });
   }
   clear() {
     this.cache.clear();
   }
   invalidate(owner: string, repo: string) {
-    this.cache.delete(
-      `${this.config().generation}:repo:${owner.toLowerCase()}/${repo.toLowerCase()}`,
-    );
+    const prefix = `${this.config().generation}:repo:${owner.toLowerCase()}/${repo.toLowerCase()}:`;
+    for (const key of this.cache.keys())
+      if (key.startsWith(prefix)) this.cache.delete(key);
   }
 }

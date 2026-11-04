@@ -5,6 +5,8 @@ import { createManagementServer } from "./management/server";
 import { initializeAdmin } from "./management/import";
 
 import { GitHubInstallations } from "./management/installations";
+import { WebAuth } from "./management/webAuth";
+import { UserAccess } from "./management/userAccess";
 import { GitHubAccounts } from "./management/accounts";
 
 async function main() {
@@ -17,11 +19,15 @@ async function main() {
     options.publicUrl.replace(/\/$/, ""),
   );
   const installations = new GitHubInstallations(store);
+  const webAuth = new WebAuth(store, options.publicUrl);
+  const userAccess = new UserAccess(accounts);
   const runtime = new Runtime(store, options.interval, accounts, installations);
   const publicServer = createManagementServer(store, runtime, {
     bootstrap: false,
     accounts,
     installations,
+    webAuth,
+    userAccess,
     publicUrl: options.publicUrl,
   }).listen(options.port, "0.0.0.0");
   // Bootstrap is a separate loopback-only listener and is never routed through Cloudflare.
@@ -29,6 +35,8 @@ async function main() {
     bootstrap: true,
     accounts,
     installations,
+    webAuth,
+    userAccess,
     publicUrl: options.publicUrl,
   }).listen(options.setupPort, "127.0.0.1");
   let stopping = false;

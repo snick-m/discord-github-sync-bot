@@ -5,7 +5,10 @@ import { Runtime } from "./runtime";
 import { validateDiscord } from "./providers";
 import { verifySignature } from "../webhookSignature";
 import { linkPage, linkCss } from "./linkPages";
-import { html, css, js } from "./ui";
+import { createUserRouter, browserSession, UserControl } from "./userServer";
+import { WebAuth } from "./webAuth";
+import { UserAccess } from "./userAccess";
+import { html, userHtml, css, js } from "./ui";
 
 import { GitHubInstallations } from "./installations";
 import { GitHubAccounts } from "./accounts";
@@ -20,13 +23,22 @@ class PublicError extends Error {
 }
 interface Options {
   bootstrap: boolean;
+  webAuth?: WebAuth;
+  userAccess?: UserAccess;
   accounts?: GitHubAccounts;
   installations?: GitHubInstallations;
   publicUrl?: string;
 }
 export type Control = Pick<
   Runtime,
-  "status" | "channels" | "reload" | "worker"
+  | "status"
+  | "channels"
+  | "reload"
+  | "worker"
+  | "userGuilds"
+  | "userChannels"
+  | "authorizeForum"
+  | "resumeHeld"
 >;
 const loopback = (host: string) =>
   host === "localhost" || host === "127.0.0.1" || host === "[::1]";
@@ -210,6 +222,13 @@ export function createManagementServer(
           browser,
           String(req.query.code ?? ""),
         );
+        if (
+          options.webAuth?.user(browserSession(req))?.discord ===
+          identity.discord
+        ) {
+          res.redirect(303, "/dashboard");
+          return;
+        }
         res
           .type("html")
           .send(linkPage({ state: "success", login: identity.login }));
@@ -331,7 +350,28 @@ export function createManagementServer(
       },
     );
   }
-  app.get("/", (_req, res) => res.type("html").send(html));
+  if (
+    !options.bootstrap &&
+    options.webAuth &&
+    options.userAccess &&
+    accounts &&
+    options.installations
+  )
+    app.use(
+      createUserRouter(
+        store,
+        runtime as UserControl,
+        options.webAuth,
+        accounts,
+        options.userAccess,
+        options.installations!,
+      ),
+    );
+  app.get("/", (_req, res) =>
+    res.type("html").send(options.bootstrap ? html : userHtml),
+  );
+  app.get("/dashboard", (_req, res) => res.type("html").send(userHtml));
+  app.get("/admin", (_req, res) => res.type("html").send(html));
   app.get("/link.css", (_req, res) => res.type("css").send(linkCss));
   app.get("/style.css", (_req, res) => res.type("css").send(css));
   app.get("/app.js", (_req, res) =>
@@ -464,6 +504,8 @@ export function createManagementServer(
     res.json({
       ...runtime.status(),
       githubInstallation: options.installations?.config(),
+      discordOAuth: options.webAuth?.config(),
+      activity: store.activity(),
       githubApp: accounts
         ? { ...accounts.app(), callbackUrl: accounts.callbackUrl }
         : undefined,
@@ -481,6 +523,23 @@ export function createManagementServer(
       webhookUrl: options.publicUrl
         ? `${new URL(options.publicUrl).origin}/github-webhook`
         : undefined,
+    }),
+  );
+  app.post(
+    "/api/discord-oauth",
+    action((req, res) => {
+      if (!options.webAuth)
+        throw new PublicError("Discord sign-in is unavailable.", 503);
+      try {
+        options.webAuth.configure(
+          field(req.body, "clientId", false, 25),
+          field(req.body, "clientSecret", true, 4096) || undefined,
+        );
+      } catch (error) {
+        throw new PublicError((error as Error).message);
+      }
+      store.audit("admin", "updated Discord sign-in");
+      res.json({ ok: true });
     }),
   );
   app.post(
@@ -536,6 +595,7 @@ export function createManagementServer(
         store.saveSecret("discord", discord);
       }
       if (secret) store.saveSecret("webhook", secret);
+      store.audit("admin", "updated Discord connection");
       if (discord) void runtime.reload();
       res.json({ ok: true });
     }),
@@ -646,11 +706,17 @@ export function createManagementServer(
         owner,
         repo,
         channel,
+        installation,
+        repositoryId: validated.find(
+          (r) => r.fullName.toLowerCase() === repository.toLowerCase(),
+        )!.id,
+        guildId: channels.find((c) => c.id === channel)?.guildId,
         backfill: req.body.backfill === true,
         enabled: true,
         roles: roles(req.body.roles),
       };
       store.saveMapping(mapping);
+      store.audit("admin", "created mapping", mapping);
       void runtime.reload();
       res.status(201).json({ mapping });
     }),
@@ -663,6 +729,11 @@ export function createManagementServer(
       if (typeof req.body.enabled !== "boolean")
         throw new PublicError("Invalid mapping state.");
       store.saveMapping({ ...mapping, enabled: req.body.enabled });
+      store.audit(
+        "admin",
+        req.body.enabled ? "resumed mapping" : "paused mapping",
+        mapping,
+      );
       void runtime.reload();
       res.json({ ok: true });
     }),

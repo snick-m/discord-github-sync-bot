@@ -268,8 +268,14 @@ export class Runtime {
             owner: mapping.owner,
             repo: mapping.repo,
             forum: mapping.channel,
+            repositoryId: mapping.repositoryId,
             readToken: () =>
-              this.installations!.repositoryToken(mapping.owner, mapping.repo),
+              this.installations!.repositoryToken(
+                mapping.owner,
+                mapping.repo,
+                mapping.repositoryId,
+                mapping.installation,
+              ),
             invalidateReadToken: () =>
               this.installations!.invalidate(mapping.owner, mapping.repo),
           },
@@ -337,6 +343,7 @@ export class Runtime {
         configured: Boolean(this.management.secret("discord")),
         connected: this.client?.isReady() ?? false,
         name: this.client?.user?.username ?? "Discord bot",
+        id: this.client?.user?.id,
         error: this.discordError,
       },
       mappings: this.management.mappings().map((mapping) => {
@@ -350,6 +357,7 @@ export class Runtime {
           ready: Boolean(worker?.engine) && !this.reloading,
           error: worker?.error,
           ...(worker?.store.health() ?? {
+            blocked: 0,
             pending: 0,
             failed: 0,
             maxAttempts: 0,
@@ -358,10 +366,89 @@ export class Runtime {
       }),
     };
   }
+  private async userGuild(discord: string, guildId: string) {
+    const client = this.client;
+    if (!client?.isReady())
+      throw new Error("The Discord bot is not connected.");
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) throw new Error("The bot is not in this server.");
+    const member = await guild.members.fetch({ user: discord, force: true });
+    await Promise.all([guild.fetch(), guild.roles.fetch()]);
+    if (!member.permissions.has(PermissionFlagsBits.ManageGuild))
+      throw new Error("Manage Server permission is required.");
+    return { guild, member, client };
+  }
+  async userGuilds(discord: string) {
+    const result: { id: string; name: string }[] = [];
+    if (!this.client?.isReady()) return result;
+    for (const guild of this.client.guilds.cache.values()) {
+      try {
+        await this.userGuild(discord, guild.id);
+        result.push({ id: guild.id, name: guild.name });
+      } catch {
+        /* Other servers are outside this user's scope. */
+      }
+    }
+    return result;
+  }
+  async authorizeForum(discord: string, channelId: string) {
+    if (!/^\d{5,25}$/.test(channelId)) throw new Error("Select a valid forum.");
+    const channel = await this.client?.channels.fetch(channelId, {
+      force: true,
+    });
+    if (!(channel instanceof ForumChannel))
+      throw new Error("Select a forum in a server with this bot.");
+    const { guild, member, client } = await this.userGuild(
+      discord,
+      channel.guildId,
+    );
+    if (!channel.permissionsFor(member)?.has(PermissionFlagsBits.ViewChannel))
+      throw new Error("You cannot view this forum.");
+    const needed = [
+      PermissionFlagsBits.ViewChannel,
+      PermissionFlagsBits.SendMessages,
+      PermissionFlagsBits.SendMessagesInThreads,
+      PermissionFlagsBits.ReadMessageHistory,
+      PermissionFlagsBits.ManageThreads,
+    ];
+    if (!channel.permissionsFor(client.user!)?.has(needed))
+      throw new Error(
+        "The bot needs View Channel, Send Messages, Send Messages in Threads, Read Message History, and Manage Threads in this forum.",
+      );
+    return {
+      id: channel.id,
+      name: channel.name,
+      guildId: guild.id,
+      guild: guild.name,
+    };
+  }
+  async userChannels(discord: string, guildId: string) {
+    const { guild } = await this.userGuild(discord, guildId);
+    const result: {
+      id: string;
+      name: string;
+      guildId: string;
+      guild: string;
+    }[] = [];
+    for (const channel of (await guild.channels.fetch()).values())
+      if (channel instanceof ForumChannel) {
+        try {
+          result.push(await this.authorizeForum(discord, channel.id));
+        } catch {
+          /* Unavailable destinations are not offered. */
+        }
+      }
+    return result;
+  }
   async channels() {
     const client = this.client;
     if (!client?.isReady()) return [];
-    const result: { id: string; name: string; guild: string }[] = [];
+    const result: {
+      id: string;
+      name: string;
+      guild: string;
+      guildId: string;
+    }[] = [];
     for (const guild of client.guilds.cache.values()) {
       const channels = await guild.channels.fetch();
       for (const channel of channels.values())
@@ -375,6 +462,7 @@ export class Runtime {
             id: channel.id,
             name: channel.name,
             guild: guild.name,
+            guildId: guild.id,
           });
     }
     return result.sort((a, b) =>

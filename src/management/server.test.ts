@@ -32,6 +32,10 @@ function setup() {
     channels: vi.fn(async () => channels),
     reload: vi.fn(async () => {}),
     worker: vi.fn(),
+    userGuilds: vi.fn(async () => []),
+    userChannels: vi.fn(async () => []),
+    authorizeForum: vi.fn(),
+    resumeHeld: vi.fn(),
   };
   const providers = {
     validateDiscord: vi.fn(async () => "Bot"),

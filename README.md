@@ -13,7 +13,25 @@ Based on [Sillhouette/discord-github-sync-bot](https://github.com/Sillhouette/di
 - Rotate the App private key without changing mappings or editing `.env`.
 - Receive repository or organization webhooks at one shared `/github-webhook` endpoint.
 
-The application starts with an **empty `.env`**. The Discord bot token, GitHub App credentials, and repository mappings belong in the management UI. Environment variables now configure only deployment options such as the public URL, ports, storage, and optional R2 uploads.
+The application starts with an **empty `.env`**. The Discord bot token, GitHub App credentials, and repository mappings belong in the management UI at `/admin`. Environment variables now configure only deployment options such as the public URL, ports, storage, and optional R2 uploads.
+
+## User dashboard and authorization
+
+`/dashboard` (also `/`) is the self-service workspace. `/admin` is the separate administrator console; it retains the existing administrator password. The interface uses compact mapping rows, a focused New mapping dialog, and connection forms behind expandable status rows.
+
+To enable member sign-in:
+
+1. In the Discord Developer Portal, open this bot's application → **OAuth2**.
+2. Add `https://gitissues.rmush.dev/auth/discord/callback` as a redirect URI (use your public hostname for another deployment).
+3. In **/admin → Connections → Discord sign-in**, save the Discord application client ID and its **OAuth client secret**, which is different from the bot token. The client ID is prefilled after the bot connects.
+
+Sign-in requests only the `identify` scope. Discord access tokens are discarded after identity verification. User sessions are separate from administrator sessions, use hashed expiring tokens and Secure/HttpOnly/SameSite cookies, and require a session-bound CSRF token for mutations. OAuth state is single-use, browser-bound, and expires after ten minutes.
+
+Members sign in with Discord, connect GitHub under **Accounts**, authorize, and review the GitHub username in the dashboard. Because the Discord identity has already been proven, this flow needs no `/github confirm` command. Discord-initiated links continue to confirm in Discord.
+
+Creating, pausing/resuming, scanning, or retrying a mapping requires **both** current GitHub repository Admin access and Discord Manage Server permission, plus forum visibility. The backend fetches current Discord membership, server roles, and forum permissions. The bot must have its required forum permissions. GitHub installation/repository discovery uses the signed-in member's linked user token; app-wide installation inventory and global credentials are admin-only. Repository, installation, guild, and actor numeric IDs are stored with each new mapping; installation read tokens are pinned to the repository ID. A repository identity replacement or installation change fails closed.
+
+Mappings belong to the repository/server relationship: any member currently meeting both administrator checks may manage them. Different people approving opposite sides is not supported. Mapping edits and recovery actions are recorded in the Activity log; members see only events for mappings they may manage. Removing a member's access prevents future dashboard mutations. Uninstalling the app or removing bot/repository permissions prevents affected sync work; the installation-token or user-token credentials are never substituted for each other.
 
 ## GitHub account linking (required for Discord writes)
 
@@ -45,7 +63,7 @@ Repository discovery and GitHub → Discord reads use installation tokens restri
 
 ## Initial administrator setup
 
-There is no default administrator password. The simplest setup is to set `ADMIN_PASSWORD` in `.env` (12–256 characters), restart the application, and sign in directly through your normal HTTPS hostname. In the deployed LXC, edit `/etc/discord-github-sync/.env` and run `systemctl restart discord-github-sync`.
+There is no default administrator password. The simplest setup is to set `ADMIN_PASSWORD` in `.env` (12–256 characters), restart the application, and sign in at `/admin` through your normal HTTPS hostname. In the deployed LXC, edit `/etc/discord-github-sync/.env` and run `systemctl restart discord-github-sync`.
 
 `ADMIN_PASSWORD` initializes the first administrator only. Once an account exists, the variable is ignored and cannot silently change its password on later restarts. The application stores only the password hash. After successful setup, remove the plaintext value from `.env`; the account continues to work. For a deliberate password reset, use the CLI described below.
 
@@ -57,7 +75,7 @@ To use the optional private browser setup in the deployed Proxmox LXC, forward i
 ssh -N -J root@server -L 5001:127.0.0.1:5001 root@10.20.84.190
 ```
 
-Keep that command running and open **http://localhost:5001** in your browser. Create a password of at least 12 characters. You can then close the tunnel and sign in at **https://gitissues.rmush.dev**. These addresses describe this installation; use your own SSH host and public hostname for another deployment.
+Keep that command running and open **http://localhost:5001** in your browser. Create a password of at least 12 characters. You can then close the tunnel and sign in at **https://gitissues.rmush.dev/admin**. These addresses describe this installation; use your own SSH host and public hostname for another deployment.
 
 For Docker, the setup listener remains private inside the container. Create the first administrator interactively instead:
 
@@ -182,4 +200,4 @@ pnpm smoke
 pnpm dev
 ```
 
-Tests cover durable recovery, edits, echo prevention, safe deletion, queue persistence, repository isolation, webhook routing, administrator bootstrap restrictions, session/CSRF protection, encrypted credential storage, installation-token rotation and scope restriction. CI also builds and smoke-tests the production Docker image. Live Discord/GitHub tests require your real credentials and chosen mappings.
+Tests cover durable recovery, edits, echo prevention, safe deletion, queue persistence, repository isolation, webhook routing, administrator bootstrap restrictions, session/CSRF protection, encrypted credential storage, installation-token rotation and scope restriction. CI also builds and smoke-tests the production Docker image. Tests also cover Discord OAuth/session isolation, CSRF binding, scoped installation discovery, dual-provider mapping authorization, numeric repository pinning, and audit visibility. Live Discord/GitHub OAuth requires your registered callback URLs and app credentials.
