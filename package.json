@@ -1,6 +1,6 @@
 {
   "name": "discord-github-sync-bot",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Bidirectional sync between Discord forum threads and GitHub issues",
   "main": "dist/index.js",
   "scripts": {
@@ -12,7 +12,8 @@
     "test:watch": "vitest",
     "format": "prettier --write src README.md",
     "queue": "node dist/queue.js",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "admin": "node dist/admin.js"
   },
   "author": "Austin Melchior (Sillhouette)",
   "license": "MIT",

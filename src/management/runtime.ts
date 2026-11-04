@@ -1,0 +1,400 @@
+import {
+  Client,
+  Events,
+  ForumChannel,
+  GatewayIntentBits,
+  Partials,
+  PermissionFlagsBits,
+  SlashCommandBuilder,
+} from "discord.js";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { Store } from "../bridge/database";
+import { Engine } from "../bridge/engine";
+import { LivePlatforms } from "../bridge/platforms";
+import { issueCommand } from "../bridge/commands";
+import { Mapping, ManagementStore } from "./store";
+import { Task } from "../bridge/types";
+
+interface Worker {
+  mapping: Mapping;
+  store: Store;
+  api?: LivePlatforms;
+  engine?: Engine;
+  error?: string;
+}
+export class Runtime {
+  private client?: Client;
+  private workers = new Map<string, Worker>();
+  private timer?: NodeJS.Timeout;
+  private scans?: NodeJS.Timeout;
+  private busy = false;
+  private stopped = false;
+  private reloading = false;
+  private reloadChain = Promise.resolve();
+  discordError?: string;
+  constructor(
+    readonly management: ManagementStore,
+    readonly interval: number,
+  ) {
+    this.refreshStores();
+  }
+  private refreshStores() {
+    for (const mapping of this.management.mappings()) {
+      const existing = this.workers.get(mapping.id);
+      if (existing) {
+        existing.mapping = mapping;
+        continue;
+      }
+      const file =
+        mapping.file ??
+        path.join(this.management.directory, "routes", `${mapping.id}.sqlite`);
+      this.workers.set(mapping.id, {
+        mapping,
+        store: new Store(
+          file,
+          `${mapping.owner}/${mapping.repo}:${mapping.channel}`.toLowerCase(),
+        ),
+      });
+    }
+  }
+  worker(id: string) {
+    return this.workers.get(id);
+  }
+  start() {
+    this.timer = setInterval(() => {
+      void this.drain().catch(() => {
+        this.discordError = "Worker storage error. Check service logs.";
+      });
+    }, 1000);
+    this.scans = setInterval(() => {
+      for (const w of this.workers.values())
+        if (w.mapping.enabled) w.store.enqueue({ type: "scan" });
+    }, this.interval);
+    this.reload();
+  }
+  reload() {
+    this.refreshStores();
+    this.reloadChain = this.reloadChain
+      .then(() => this.connect())
+      .catch(() => {
+        this.discordError =
+          "Connection initialization failed. Check credentials and channel permissions.";
+      });
+    return this.reloadChain;
+  }
+  private async connect() {
+    if (this.stopped) return;
+    this.reloading = true;
+    try {
+      while (this.busy && !this.stopped)
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      if (this.stopped) return;
+      this.client?.destroy();
+      this.client = undefined;
+      this.discordError = undefined;
+      this.refreshStores();
+      for (const worker of this.workers.values()) {
+        worker.api = undefined;
+        worker.engine = undefined;
+        worker.error = undefined;
+      }
+      const token = this.management.secret("discord");
+      if (!token) return;
+      const client = new Client({
+        intents: [
+          GatewayIntentBits.Guilds,
+          GatewayIntentBits.GuildMessages,
+          GatewayIntentBits.MessageContent,
+        ],
+        partials: [Partials.Message, Partials.Channel],
+      });
+      this.client = client;
+      const route = (channelId: string, parentId?: string | null) =>
+        [...this.workers.values()].find(
+          (w) =>
+            w.mapping.enabled &&
+            (w.mapping.channel === parentId ||
+              Boolean(w.store.thread(channelId))),
+        );
+      const enqueue = (worker: Worker | undefined, task: Task) => {
+        if (worker && client === this.client)
+          worker.store.enqueue(task, randomUUID());
+      };
+      client.on(Events.ThreadCreate, (thread) =>
+        enqueue(route(thread.id, thread.parentId), {
+          type: "discord",
+          thread: thread.id,
+        }),
+      );
+      client.on(Events.ThreadDelete, (thread) =>
+        enqueue(route(thread.id, thread.parentId), {
+          type: "unlink",
+          thread: thread.id,
+        }),
+      );
+      const message = (m: {
+        channelId: string;
+        author?: { bot: boolean } | null;
+        channel: { isThread(): boolean; parentId?: string | null };
+      }) => {
+        if (m.author?.bot) return;
+        enqueue(
+          route(
+            m.channelId,
+            m.channel.isThread() ? m.channel.parentId : undefined,
+          ),
+          { type: "discord", thread: m.channelId },
+        );
+      };
+      client.on(Events.MessageCreate, message);
+      client.on(Events.MessageUpdate, (_old, m) => message(m));
+      client.on(Events.MessageDelete, message);
+      client.on(Events.MessageBulkDelete, (_messages, channel) =>
+        enqueue(
+          route(channel.id, channel.isThread() ? channel.parentId : undefined),
+          { type: "discord", thread: channel.id },
+        ),
+      );
+      client.on(Events.ShardResume, () => {
+        for (const w of this.workers.values())
+          if (w.mapping.enabled)
+            w.store.enqueue({ type: "scan" }, randomUUID());
+      });
+      client.on(Events.Error, () => {
+        this.discordError = "Discord connection error; reconnecting.";
+      });
+      client.on(Events.InteractionCreate, async (interaction) => {
+        if (
+          !interaction.isChatInputCommand() ||
+          interaction.commandName !== "issue"
+        )
+          return;
+        try {
+          const repository = interaction.options
+            .getString("repository")
+            ?.toLowerCase();
+          const candidates = [...this.workers.values()].filter(
+            (w) =>
+              w.mapping.enabled &&
+              w.api?.guildId === interaction.guildId &&
+              (!repository ||
+                `${w.mapping.owner}/${w.mapping.repo}`.toLowerCase() ===
+                  repository),
+          );
+          const worker =
+            candidates.find((w) => w.store.thread(interaction.channelId)) ??
+            (candidates.length === 1 ? candidates[0] : undefined);
+          if (!worker?.api) {
+            await interaction.reply({
+              content:
+                "Use this in a synced thread, or specify repository:owner/repo and number when several repositories are mapped.",
+              ephemeral: true,
+            });
+            return;
+          }
+          await issueCommand(interaction, worker.store, worker.api, {
+            forum: worker.mapping.channel,
+            roles: worker.mapping.roles,
+          });
+        } catch {
+          const text =
+            "Command failed. Check the mapping status in Issue Bridge.";
+          if (interaction.deferred || interaction.replied)
+            await interaction.editReply(text).catch(() => {});
+          else
+            await interaction
+              .reply({ content: text, ephemeral: true })
+              .catch(() => {});
+        }
+      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(
+            () => reject(new Error("Discord connection timeout")),
+            25_000,
+          );
+          client.once(Events.ClientReady, () => {
+            clearTimeout(timeout);
+            resolve();
+          });
+          void client.login(token).catch((error) => {
+            clearTimeout(timeout);
+            reject(error);
+          });
+        });
+      } catch {
+        client.destroy();
+        this.discordError =
+          "Discord could not connect. Check the bot token and enable Message Content Intent.";
+        return;
+      }
+      if (this.stopped) {
+        client.destroy();
+        return;
+      }
+      const guilds = new Set<string>();
+      for (const worker of this.workers.values()) {
+        if (!worker.mapping.enabled) continue;
+        const mapping = worker.mapping;
+        const credential = this.management.credential(mapping.credential);
+        const githubToken = this.management.secret(
+          `github:${mapping.credential}`,
+        );
+        if (!credential || !githubToken) {
+          worker.error = "Select an available GitHub credential.";
+          continue;
+        }
+        const api = new LivePlatforms(client, {
+          owner: mapping.owner,
+          repo: mapping.repo,
+          forum: mapping.channel,
+          token: githubToken,
+        });
+        try {
+          await api.initialize();
+          worker.api = api;
+          worker.engine = new Engine(worker.store, api, mapping.backfill);
+          guilds.add(api.guildId);
+          worker.store.enqueue({ type: "scan" }, randomUUID());
+        } catch (error) {
+          const err = error as { message?: string; status?: number };
+          worker.error = err.message?.startsWith("Missing forum permissions:")
+            ? err.message
+            : `Unable to initialize. Check repository access, organization approval, and forum permissions.${err.status ? ` HTTP ${err.status}.` : ""}`;
+        }
+      }
+      const command = new SlashCommandBuilder()
+        .setName("issue")
+        .setDescription("Manage a synced GitHub issue");
+      for (const action of ["status", "close", "reopen"])
+        command.addSubcommand((sub) =>
+          sub
+            .setName(action)
+            .setDescription(`${action} a linked issue`)
+            .addIntegerOption((option) =>
+              option
+                .setName("number")
+                .setDescription("Issue number; optional inside its thread")
+                .setMinValue(1),
+            )
+            .addStringOption((option) =>
+              option
+                .setName("repository")
+                .setDescription(
+                  "owner/repo; required outside a thread when several repositories are mapped",
+                ),
+            ),
+        );
+      for (const guild of guilds)
+        await client.application!.commands.create(command.toJSON(), guild);
+    } finally {
+      this.reloading = false;
+    }
+  }
+  status() {
+    return {
+      discord: {
+        configured: Boolean(this.management.secret("discord")),
+        connected: this.client?.isReady() ?? false,
+        name: this.client?.user?.username ?? "Discord bot",
+        error: this.discordError,
+      },
+      mappings: this.management.mappings().map((mapping) => {
+        const worker = this.workers.get(mapping.id);
+        const channel = this.client?.channels.cache.get(mapping.channel);
+        return {
+          ...mapping,
+          file: undefined,
+          channelName:
+            channel && "name" in channel ? channel.name : mapping.channel,
+          ready: Boolean(worker?.engine) && !this.reloading,
+          error: worker?.error,
+          ...(worker?.store.health() ?? {
+            pending: 0,
+            failed: 0,
+            maxAttempts: 0,
+          }),
+        };
+      }),
+    };
+  }
+  async channels() {
+    const client = this.client;
+    if (!client?.isReady()) return [];
+    const result: { id: string; name: string; guild: string }[] = [];
+    for (const guild of client.guilds.cache.values()) {
+      const channels = await guild.channels.fetch();
+      for (const channel of channels.values())
+        if (
+          channel instanceof ForumChannel &&
+          channel
+            .permissionsFor(client.user!)
+            ?.has(PermissionFlagsBits.ViewChannel)
+        )
+          result.push({
+            id: channel.id,
+            name: channel.name,
+            guild: guild.name,
+          });
+    }
+    return result.sort((a, b) =>
+      `${a.guild}/${a.name}`.localeCompare(`${b.guild}/${b.name}`),
+    );
+  }
+  private async drain() {
+    if (this.busy || this.reloading || this.stopped) return;
+    this.busy = true;
+    try {
+      for (const worker of this.workers.values()) {
+        if (
+          !worker.mapping.enabled ||
+          !worker.engine ||
+          !this.client?.isReady()
+        )
+          continue;
+        const job = worker.store.next();
+        if (!job) continue;
+        try {
+          await worker.engine.run(job.task);
+          worker.store.complete(job.id);
+        } catch (error) {
+          const err = error as {
+            status?: number;
+            response?: { headers?: Record<string, string> };
+          };
+          const headers = err.response?.headers;
+          const retry = Number(headers?.["retry-after"]) * 1000;
+          const reset =
+            Number(headers?.["x-ratelimit-reset"]) * 1000 - Date.now();
+          const delay =
+            retry > 0
+              ? retry
+              : headers?.["x-ratelimit-remaining"] === "0" && reset > 0
+                ? reset + 1000
+                : undefined;
+          worker.store.fail(
+            job.id,
+            job.attempts,
+            `Sync failed${err.status ? ` (HTTP ${err.status})` : ""}. Check token access and channel permissions.`,
+            delay,
+          );
+          console.error(
+            `Mapping ${worker.mapping.id}: ${job.task.type} job ${job.id} failed${err.status ? ` (HTTP ${err.status})` : ""}.`,
+          );
+        }
+      }
+    } finally {
+      this.busy = false;
+    }
+  }
+  async close() {
+    this.stopped = true;
+    clearInterval(this.timer);
+    clearInterval(this.scans);
+    this.client?.destroy();
+    while (this.busy || this.reloading)
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    for (const worker of this.workers.values()) worker.store.close();
+  }
+}

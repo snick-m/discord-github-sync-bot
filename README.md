@@ -1,150 +1,153 @@
-# GitHub Issues ↔ Discord forum sync
+# Issue Bridge
 
-A self-hosted bridge for one GitHub repository and one Discord forum channel. Run one bot instance on your homeserver with Docker Compose. Based on [Sillhouette/discord-github-sync-bot](https://github.com/Sillhouette/discord-github-sync-bot), originally by [holmityd](https://github.com/holmityd/GitHub-Issues-Discord-Threads-Bot). MIT licensed; original credits retained in LICENSE.
+A self-hosted GitHub Issues ↔ Discord forum bridge with a management page. Add GitHub credentials once, then map each repository to its own Discord forum. Configuration changes apply without restarting the service.
 
-This fork replaces the upstream in-memory sync runtime with a SQLite-backed engine while retaining TypeScript, discord.js, Octokit, Express, webhook signature verification, and the R2 uploader.
+Based on [Sillhouette/discord-github-sync-bot](https://github.com/Sillhouette/discord-github-sync-bot), originally by [holmityd](https://github.com/holmityd/GitHub-Issues-Discord-Threads-Bot). MIT; original credits are retained in LICENSE.
 
-## What syncs
+## Manage through the web page
 
-- New GitHub issues create forum posts. Human-created forum posts create GitHub issues.
-- Replies sync both ways with attribution and source links. Bot/webhook-authored Discord messages are excluded to prevent loops.
-- GitHub title, body, labels, lock state, and open/closed state update the Discord thread and a bot-owned summary. Matching label names become forum tags (at most five).
-- For a Discord-origin issue, editing the original Discord starter updates its GitHub body. Other issue metadata is managed on GitHub after creation; later Discord title/tag changes are not sent upstream.
-- Discord-origin replies are editable from Discord; GitHub-origin replies are editable from GitHub. Editing the mirrored copy does not change its source.
-- Long GitHub content is split across messages with a source link in every part. Shortened content leaves a placeholder in obsolete parts.
-- Deleted source comments/messages become a deletion notice in their mirrors. Deleting an entire thread or issue **disables its mapping**; it does not delete the other side or recreate the deleted object.
-- All outbound Discord messages disable mentions, including edits.
+- Connect one Discord bot and choose its available forum channels from a dropdown.
+- Save multiple GitHub credentials, including organization-scoped fine-grained personal access tokens.
+- Map repositories to forums, choose whether to import existing items, and configure manager roles per mapping.
+- Pause/resume mappings, queue recovery scans, inspect queue counts, and retry failed changes.
+- Replace a saved token without changing its mappings or editing `.env`.
+- Receive repository or organization webhooks at one shared `/github-webhook` endpoint.
 
-**Archiving is not issue closure.** Discord automatically archives inactive posts. This never closes or reopens a GitHub issue. Use the commands below for deliberate status changes.
+The application starts with an **empty `.env`**. Discord tokens, GitHub tokens, and repository mappings belong in the management UI. Environment variables now configure only deployment options such as the public URL, ports, storage, and optional R2 uploads.
 
-## Homeserver setup
+## GitHub organization tokens
 
-### 1. Create a Discord bot and a dedicated forum
+Fine-grained PATs are supported. Create one under a user account, select your **organization as resource owner**, choose the repositories you want, and grant **Issues: read and write** plus the default Metadata permission. An organization may require approval before the token can access private resources, including after access changes. The underlying user's own access and the organization's token policy still apply.
 
-In the [Discord Developer Portal](https://discord.com/developers/applications), create an application and bot, copy its token, and enable **Message Content Intent**. Invite it using the `bot` and `applications.commands` scopes.
+One such token can serve multiple mapped repositories in that organization. In the management page, use the organization name in **Resource owner**. The app validates repository discovery and offers accessible, non-archived repositories with issues enabled. GitHub enforces write permissions when processing changes; an inaccessible/expired token is reported in mapping status or the retry queue.
 
-Give the bot these permissions in your forum:
+A PAT still belongs to a user and actions appear under that user's identity. A GitHub App is the appropriate future option for a separate bot identity or centrally managed installation permissions. This version does not impersonate an organization.
+
+## Initial administrator setup
+
+There is no default administrator password. Public first-time registration is disabled. Create your administrator through the private setup listener on `127.0.0.1:5001`, then sign in through your normal HTTPS hostname.
+
+For the deployed Proxmox LXC, forward the private setup port from your own computer:
+
+```sh
+ssh -N -J root@server -L 5001:127.0.0.1:5001 root@10.20.84.190
+```
+
+Keep that command running and open **http://localhost:5001** in your browser. Create a password of at least 12 characters. You can then close the tunnel and sign in at **https://gitissues.rmush.dev**. These addresses describe this installation; use your own SSH host and public hostname for another deployment.
+
+For Docker, the setup listener remains private inside the container. Create the first administrator interactively instead:
+
+```sh
+docker compose exec bot node dist/admin.js setup
+```
+
+Input is hidden. Then open the dashboard through your HTTPS reverse proxy, or through its loopback-published host port for local use.
+
+Sessions expire after 12 hours. The web API requires authentication and same-origin mutation requests, and login attempts are rate limited. Public sessions use Secure, HttpOnly, SameSite cookies. The setup listener checks localhost hostnames in addition to binding loopback. Do not expose port 5001 through a reverse proxy or tunnel.
+
+To recover a forgotten password, run `node dist/admin.js reset` interactively as the service user with the correct `DATA_DIR`; this invalidates all existing sessions. In Docker, use `docker compose exec bot node dist/admin.js reset`.
+
+## Connect Discord
+
+In the [Discord Developer Portal](https://discord.com/developers/applications), create a bot and enable **Message Content Intent**. Invite it to your server with the `bot` and `applications.commands` scopes.
+
+For every mapped forum, grant the bot:
 
 - View Channel
-- Send Messages (needed to create forum posts)
+- Send Messages
 - Send Messages in Threads
 - Read Message History
 - Manage Threads
 
-It does not need Administrator, Manage Messages, Manage Webhooks, Presence Intent, or Members Intent. Permissions and the forum type are checked at startup. Use a forum without a required-tag policy, or ensure every mirrored issue has a label matching an available forum tag. Obtain the forum channel ID using Discord Developer Mode.
+The bot does not need Administrator, Manage Messages, Manage Webhooks, Presence Intent, or Members Intent. Use forum channels without required tags, or ensure every incoming issue has a label matching an available forum tag.
 
-Everything humans write in this forum is eligible for copying to GitHub. Choose the repository and forum audience accordingly.
+Enter the bot token in **Your Discord bot** in the management page. After it connects, refresh channels, add a GitHub credential, and create a mapping. Each repository and each forum can belong to only one saved mapping, including paused mappings. Repository and forum cannot be changed in place because existing issue/thread identities must stay stable; token replacement and pause/resume preserve their history.
 
-### 2. Create GitHub credentials
+The forum is a publishing boundary: human-created posts and replies are eligible for copying to its mapped GitHub repository. Choose the audience accordingly.
 
-Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) scoped to the target repository, with **Issues: read and write** and the default Metadata access. Approve the token in your organization if required. Track its expiration and rotate it in `.env` before it expires.
+## Sync behavior
 
-This version uses a PAT, not a GitHub App. GitHub issues/comments appear under the PAT account, with the Discord author credited in the body. Pull requests are excluded.
+- New GitHub issues create forum posts. Human-created forum posts create GitHub issues.
+- Replies sync both ways with attribution and source links; Discord bot/webhook messages are excluded.
+- Edit the original reply on its source platform to update its mirror.
+- GitHub title, body, labels, lock state, and open/closed state update the forum thread and bot-owned summary. Matching label names become forum tags, up to five.
+- For Discord-origin issues, editing the original starter updates its GitHub body. Other metadata is managed on GitHub after creation; later Discord title/tag changes do not change GitHub.
+- Long GitHub content is split across messages. Shortening content leaves placeholders in obsolete parts.
+- Deleted source comments/messages become deletion notices in their mirrors. Deleting an entire thread/issue disables its mapping; it does not delete its counterpart or recreate the removed object.
+- Outbound Discord messages disable mentions, including edits.
 
-### 3. Configure and start
+**Archiving is not closure.** Inactivity auto-archive never changes GitHub state. Use `/issue close` or `/issue reopen`. Inside a synced thread the repository is inferred; elsewhere specify `repository:owner/repo` and `number:123` when multiple repositories are mapped. Close/reopen require access to the forum plus Manage Threads there or one of its configured manager roles. `/issue status` shows the linked issue.
+
+## Webhooks and polling
+
+Polling works without public ingress or a webhook secret. A recovery scan runs on startup, after Discord resumes a connection, and every `RECONCILE_SECONDS` (default 300, minimum 60).
+
+For immediate GitHub updates, save a shared webhook secret in the management page and configure a webhook on each repository, or an organization webhook covering the mapped repositories:
+
+- URL: `https://YOUR_HOST/github-webhook`
+- Content type: `application/json`
+- Secret: the same value you entered in the management page
+- Events: **Issues** and **Issue comments**
+
+Unmapped repositories cannot create work. Events are routed by full repository name and committed to that mapping's durable queue before acknowledgement. Pull requests are excluded. Pings return 200; accepted issue changes return 202. Paused mappings acknowledge events without processing them; recovery scans reconcile current state on resume.
+
+With the deployed Cloudflare Tunnel, the public hostname is `gitissues.rmush.dev` and `cloudflared` runs in LXC 109. The application requires `PUBLIC_URL=https://gitissues.rmush.dev` in the service environment. The tunnel forwards the dashboard, its assets/API, and the webhook to `http://127.0.0.1:5000`; authentication protects management routes. The private setup port is never forwarded. Avoid Cloudflare Access login or browser challenges on `/github-webhook`, since GitHub cannot complete those interactions.
+
+## Deployment
+
+Requires Node.js 24+ with built-in SQLite. Run one application instance per data directory.
 
 ```sh
 git clone https://github.com/snick-m/discord-github-sync-bot.git
 cd discord-github-sync-bot
-cp .env.example .env
-chmod 600 .env
+touch .env
+# Set PUBLIC_URL to your HTTPS origin if using a public hostname.
+docker compose up -d --build
 ```
 
-Fill in the six required values in `.env`: `DISCORD_TOKEN`, `DISCORD_CHANNEL_ID`, `GITHUB_ACCESS_TOKEN`, `GITHUB_USERNAME`, `GITHUB_REPOSITORY`, and `GITHUB_WEBHOOK_SECRET`. `GITHUB_USERNAME` is the repository owner (user or organization); `GITHUB_REPOSITORY` is its name without the owner.
+Compose publishes port 5000 only on the host's loopback interface and stores data in `bot-data`. An HTTPS reverse proxy or Cloudflare Tunnel can forward to that port. A containerized proxy must join the same network and use `http://bot:5000`.
 
-Choose a random webhook secret, for example by running `openssl rand -hex 32`, and enter that value in both `.env` and GitHub. Never commit `.env` or put secrets in webhook URLs.
+For the native LXC installation:
 
-Defaults import items created from the first start onward. Set `BACKFILL=open` before starting to also import existing open issues and active human-created forum posts. That can create many objects; use a dedicated forum. Items created during later downtime are recovered even with `BACKFILL=none`.
+- App: `/opt/discord-github-sync`
+- Optional environment file: `/etc/discord-github-sync/.env` (the app's `.env` is a symlink)
+- State: `/var/lib/discord-github-sync`
+- Service: `discord-github-sync.service`, running as `gdsync`
+- Public port: 5000; private initial setup port: 5001
 
 ```sh
-docker compose up -d --build
-docker compose logs -f bot
+systemctl status discord-github-sync
+journalctl -u discord-github-sync -f
 curl --fail http://127.0.0.1:5000/health
 ```
 
-Wait for `Ready: owner/repository ↔ forum ...`. Health returns 503 until Discord connects and startup checks finish. SQLite lives in the named `bot-data` volume. **Do not use `docker compose down -v` unless you intend to erase mappings and pending jobs.** Run only one bot instance against a database.
+Health indicates the management process is available, even before Discord is configured. The dashboard reports Discord connection and individual mapping errors separately. Configuration changes finish any currently running sync job before applying the new connection state; a paused mapping keeps its history and pending jobs.
 
-### 4. Expose the GitHub webhook
+## State, recovery, and backups
 
-The bot is published only on `127.0.0.1:5000` by default. Use an existing HTTPS reverse proxy or a Cloudflare Tunnel running on the host, forwarding to `http://127.0.0.1:5000`. If your tunnel/proxy is another container, join the same Docker network and use `http://bot:5000` instead of localhost.
+`management.sqlite` holds encrypted credentials, mappings, administrator password hashes, and hashed sessions. Credentials use AES-256-GCM with the separate `master.key` file. Tokens are write-only through the web API and are not returned to the browser. Host access to both the database and key allows credential recovery, so restrict and protect backups.
 
-The bot process runs on your server; a tunnel does not run it inside a Cloudflare Worker. Forward only `/github-webhook` if your proxy supports path restrictions.
+Each mapping has its own `routes/<mapping-id>.sqlite` with issue/thread links, comment/message links, delivery deduplication, and retry jobs. Issue numbers therefore never collide across repositories. An existing single-repository `.env` is imported once, and its original `sync.sqlite` path is retained so mappings and pending work survive the upgrade. The environment file is not modified by migration.
 
-In the target GitHub repository, go to **Settings → Webhooks → Add webhook**:
+Back up the **whole data directory**, including `master.key`, while the service is stopped. Preserve any SQLite `-wal` and `-shm` files present. Losing the key makes saved credentials unusable; the application refuses to silently replace a missing key when encrypted credentials exist. `docker compose down -v` erases state and should not be used during normal updates.
 
-- Payload URL: `https://your-bot-domain.example/github-webhook`
-- Content type: `application/json`
-- Secret: the exact `GITHUB_WEBHOOK_SECRET` value
-- Individual events: **Issues** and **Issue comments**
-- Keep SSL verification enabled.
+The engine uses durable queues, source markers, and remote message history to recover interrupted writes. Cross-service writes are not a distributed exactly-once transaction. Recovery scans enumerate mapped issue/comment histories and active/archived forum threads; this is intended for a modest-volume self-hosted installation rather than very large community archives.
 
-A successful ping returns HTTP 200. Valid issue deliveries return 202 after they have been committed to SQLite. Root POST `/` remains a compatibility alias.
-
-### 5. Smoke-test your installation
-
-1. Create a GitHub issue. Check that one Discord post appears with its source link.
-2. Reply on each side and verify the replies arrive once. Edit each original reply and verify its mirror updates.
-3. Create a forum post and verify one GitHub issue appears.
-4. Restart the bot with `docker compose restart bot`, then add another reply on each side. Verify the existing mappings still work.
-5. Archive a thread manually. Its GitHub issue must remain open.
-6. Close and reopen through `/issue` and GitHub. Verify the summary and archived state update.
-
-These live checks require real credentials. Automated tests use fakes and do not post to either service.
-
-## Commands
-
-The bot registers a guild-scoped `/issue` command automatically:
-
-- `/issue status` — show the linked issue.
-- `/issue close` — close it on GitHub and archive its thread.
-- `/issue reopen` — reopen it.
-
-Inside a synced thread, the issue is inferred. Supply `number:123` from another channel in the same server when the thread is archived. You must have access to the forum. Close/reopen additionally require **Manage Threads in the forum**, or one of the comma-separated `MANAGER_ROLE_IDS`. The command acknowledges a durable job; API failures are retried and visible in logs/queue status.
-
-## Reliability and operations
-
-The engine runs one durable job at a time. Webhook delivery IDs are deduplicated; message mappings and content hashes suppress echoes. Source markers and bot-authored message history let retries recover remote writes whose responses were lost. Cross-service writes cannot be a single transaction, so this is recoverable synchronization, not a distributed exactly-once guarantee.
-
-A recovery scan runs on startup, after a resumed Discord connection, and every `RECONCILE_SECONDS` (default 300, minimum 60). It scans updated GitHub issues, all mapped issues/comments, and active/archived forum posts and their message histories. This recovers missed creates, edits, and deletions. It is intended for a modest-volume single repo/forum; large archives require incremental history indexing before scaling up.
-
-Failed jobs retry with exponential backoff and respect GitHub rate-limit headers. After ten failures, a job is retained as failed and other work can proceed. Fix the underlying permission/configuration/API problem, then retry it:
+One mapping's failed job does not block other mappings. Jobs retry with backoff and respect GitHub rate-limit headers; after ten failures they remain available for inspection and manual retry in the dashboard. Command-line equivalents:
 
 ```sh
-docker compose exec bot node dist/queue.js status
-docker compose exec bot node dist/queue.js retry JOB_ID
-docker compose exec bot node dist/queue.js retry all
+pnpm queue list
+pnpm queue owner/repo status
+pnpm queue owner/repo retry all
 ```
 
-`GET /health` reports Discord readiness, pending/failed job counts, and maximum attempts. Docker health status alone does not restart an unhealthy container; process exits are restarted by Compose. Monitor logs and failed jobs. HTTP 404 on a mapped issue/thread disables the mapping to avoid unwanted recreation; transient network errors and 403s are retried.
-
-Back up the SQLite volume while the bot is stopped, including the database, `-wal`, and `-shm` files if present:
-
-```sh
-docker compose stop bot
-# Use your normal Docker volume backup procedure for this project's bot-data volume.
-docker compose start bot
-```
-
-The database is bound to its repository/forum configuration. For a different pairing, use a separate Compose project and volume. Existing upstream `commentMap.json` data is not automatically migrated; this fork is designed for a fresh installation. Old upstream deployment scripts/docs under `docs/` are historical, not instructions for this runtime.
-
-To update:
-
-```sh
-git pull --ff-only
-docker compose up -d --build
-```
-
-Back up before upgrading or rolling back. Keep the previous Git commit/image until the new version passes your smoke tests.
+For CLI tools in the LXC, run as `gdsync` with `DATA_DIR=/var/lib/discord-github-sync` and the absolute Node path `/usr/local/bin/node` if it is absent from the shell's PATH.
 
 ## Attachments
 
-Without optional R2 configuration, copied Discord attachment URLs can expire. Set all four R2 variables in `.env` to rehost files in your bucket with a public HTTPS base URL. Use a Cloudflare API token authorized for uploading objects to that bucket. Rehosted files are capped at 20 MiB each; oversized files fail their job rather than silently disappearing. R2 storage/API usage is separate from hosting the bot.
+Without optional R2 configuration, copied Discord attachment URLs can expire. Set all four R2 variables in `.env` to rehost files in your bucket with a public HTTPS base URL. Uploads are capped at 20 MiB per file. Deleting a source does not delete rehosted objects; manage retention separately. Private GitHub attachment links may also expire or be inaccessible in Discord.
 
-Deleting a source message does not remove an already rehosted object; manage storage retention separately. Signed links to private GitHub attachments may also expire or be inaccessible in Discord.
-
-## Local development
-
-Requires Node.js 24+ (built-in SQLite) and pnpm 8.6.3.
+## Development
 
 ```sh
 pnpm install --frozen-lockfile
@@ -155,4 +158,4 @@ pnpm smoke
 pnpm dev
 ```
 
-Tests cover lost API responses, restart persistence, bidirectional edits, echo prevention, long messages, safe deletion behavior, recovery imports, signed webhook intake, durable retries, and configuration validation. CI runs type checking, tests, the build, a Docker build, and credential-free startup smoke checks.
+Tests cover durable recovery, edits, echo prevention, safe deletion, queue persistence, repository isolation, webhook routing, administrator bootstrap restrictions, session/CSRF protection, encrypted credential storage, and legacy configuration migration. CI also builds and smoke-tests the production Docker image. Live Discord/GitHub tests require your real credentials and chosen mappings.

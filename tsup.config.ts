@@ -1,6 +1,10 @@
 import { defineConfig } from "tsup";
 export default defineConfig({
-  entry: { index: "src/index.ts", queue: "src/queue.ts" },
+  entry: {
+    index: "src/index.ts",
+    queue: "src/queue.ts",
+    admin: "src/admin.ts",
+  },
   outDir: "dist",
   format: ["cjs"],
   target: "node24",
