@@ -1,19 +1,19 @@
 # Issue Bridge
 
-A self-hosted GitHub Issues ↔ Discord forum bridge with a management page. Add GitHub credentials once, then map each repository to its own Discord forum. Configuration changes apply without restarting the service.
+A self-hosted GitHub Issues ↔ Discord forum bridge with a management page. Configure a GitHub App once, then map each repository to its own Discord forum. Configuration changes apply without restarting the service.
 
 Based on [Sillhouette/discord-github-sync-bot](https://github.com/Sillhouette/discord-github-sync-bot), originally by [holmityd](https://github.com/holmityd/GitHub-Issues-Discord-Threads-Bot). MIT; original credits are retained in LICENSE.
 
 ## Manage through the web page
 
 - Connect one Discord bot and choose its available forum channels from a dropdown.
-- Save multiple GitHub credentials, including organization-scoped fine-grained personal access tokens.
+- Discover GitHub App installations and the repositories each account has approved.
 - Map repositories to forums, choose whether to import existing items, and configure manager roles per mapping.
 - Pause/resume mappings, queue recovery scans, inspect queue counts, and retry failed changes.
-- Replace a saved token without changing its mappings or editing `.env`.
+- Rotate the App private key without changing mappings or editing `.env`.
 - Receive repository or organization webhooks at one shared `/github-webhook` endpoint.
 
-The application starts with an **empty `.env`**. Discord tokens, GitHub tokens, and repository mappings belong in the management UI. Environment variables now configure only deployment options such as the public URL, ports, storage, and optional R2 uploads.
+The application starts with an **empty `.env`**. The Discord bot token, GitHub App credentials, and repository mappings belong in the management UI. Environment variables now configure only deployment options such as the public URL, ports, storage, and optional R2 uploads.
 
 ## GitHub account linking (required for Discord writes)
 
@@ -22,7 +22,7 @@ Register a GitHub App under your organization or account and install it on the s
 - Homepage: your public bridge URL.
 - User authorization callback: `https://gitissues.rmush.dev/auth/github/callback` (replace the hostname for another deployment).
 - Repository permissions: **Issues: read and write**, Metadata: read.
-- Enable expiring user access tokens. A private key is not needed for this user-token flow.
+- Enable expiring user access tokens. Leave authorization during installation and Device Flow disabled; members initiate authorization through Discord.
 - Webhook URL: the dashboard’s `/github-webhook` URL, with the same shared webhook secret configured in the dashboard. Authorization revocation events invalidate linked tokens; Issues and Issue comments events can also use this endpoint.
 
 Enter the App’s **client ID**, **slug**, and **client secret** in the dashboard’s account-linking section. The secret and member tokens are encrypted at rest and never returned by the API. Changing the client ID requires members to authorize again.
@@ -31,15 +31,17 @@ Each member runs `/github link`, opens the private single-use URL, clicks **Cont
 
 **There is no shared-token fallback for Discord → GitHub.** New issues, comments, edits, deletion tombstones, and close/reopen actions require the appropriate linked user token and GitHub permissions. Expired, revoked, missing, or unauthorized credentials hold the change. Messages remain in Discord, recent messages get a rate-limited linking notice, and held counts appear in the dashboard. Linking triggers a recovery scan; only surviving source messages are sent. GitHub → Discord continues for GitHub contributors without Discord links. Reactions are not synced.
 
-Writes appear as the actual GitHub user (with GitHub’s app attribution). Existing posts authored by the previous bridge account keep their original author; GitHub does not permit changing authorship, and their edits may require permissions the linked member does not have.
+Writes appear as the actual GitHub user (with GitHub’s app attribution).
 
-## GitHub organization tokens
+## GitHub App installation access (required for repository reads)
 
-Fine-grained PATs are supported. Create one under a user account, select your **organization as resource owner**, choose the repositories you want, and grant **Issues: read** plus the default Metadata permission. An organization may require approval before the token can access private resources, including after access changes. The underlying user's own access and the organization's token policy still apply.
+In your GitHub App settings, find the numeric **App ID**, then generate and download an RSA private key under **Private keys**. In the dashboard, first save the app’s client ID, slug, and client secret, then enter its App ID and paste the PEM private key into **App installation access**. The server validates that the ID and key belong to the same app as the saved client settings. The key is encrypted and never returned by the API.
 
-One such token can serve multiple mapped repositories in that organization. In the management page, use the organization name in **Resource owner**. The app validates repository discovery and offers accessible, non-archived repositories with issues enabled. This token is used only for repository reads. All Discord-originated writes use the linked member’s GitHub App user token. An inaccessible/expired reading token is reported in mapping status or the retry queue.
+Install this app on each organization or personal account you want to sync, selecting its approved repositories. Refresh installations in the dashboard, select the account installation and repository, then choose a Discord forum. Organization approval and repository access are controlled by the GitHub App installation. Another organization does not need to supply a PAT or create a separate GitHub App; its administrator installs this app, and this instance’s administrator configures its mappings.
 
-A PAT still belongs to a user and actions appear under that user's identity. A GitHub App is the appropriate future option for a separate bot identity or centrally managed installation permissions. This version does not impersonate an organization.
+Repository discovery and GitHub → Discord reads use installation tokens restricted to **Issues: read** and **Metadata: read**. Sync tokens are additionally restricted to the single mapped repository. Tokens stay in memory, expire after an hour, and refresh automatically. A rejected token is refreshed once; missing installations, suspended accounts, or revoked repository access fail closed. Installation permission changes trigger a reconnect through the webhook.
+
+**Personal access tokens are not supported.** The PAT UI, API, environment import, and stored PATs are removed. Existing mapping identities, queues, and message history are retained. Reads pause until the App ID and private key are configured. Discord-originated writes always require the member’s linked GitHub authorization and never use the installation token.
 
 ## Initial administrator setup
 
@@ -83,7 +85,7 @@ For every mapped forum, grant the bot:
 
 The bot does not need Administrator, Manage Messages, Manage Webhooks, Presence Intent, or Members Intent. Use forum channels without required tags, or ensure every incoming issue has a label matching an available forum tag.
 
-Enter the bot token in **Your Discord bot** in the management page. After it connects, refresh channels, add a GitHub credential, and create a mapping. Each repository and each forum can belong to only one saved mapping, including paused mappings. Repository and forum cannot be changed in place because existing issue/thread identities must stay stable; token replacement and pause/resume preserve their history.
+Enter the bot token in **Your Discord bot** in the management page. After it connects, refresh channels, configure installation access, and create a mapping. Each repository and each forum can belong to only one saved mapping, including paused mappings. Repository and forum cannot be changed in place because existing issue/thread identities must stay stable; private-key rotation and pause/resume preserve their history.
 
 The forum is a publishing boundary: human-created posts and replies are eligible for copying to its mapped GitHub repository. Choose the audience accordingly.
 
@@ -104,7 +106,7 @@ The forum is a publishing boundary: human-created posts and replies are eligible
 
 Polling works without public ingress or a webhook secret. A recovery scan runs on startup, after Discord resumes a connection, and every `RECONCILE_SECONDS` (default 300, minimum 60).
 
-For immediate GitHub updates, save a shared webhook secret in the management page and configure a webhook on each repository, or an organization webhook covering the mapped repositories:
+For immediate GitHub updates, save a shared webhook secret in the management page and enable the GitHub App webhook:
 
 - URL: `https://YOUR_HOST/github-webhook`
 - Content type: `application/json`
@@ -149,7 +151,7 @@ Health indicates the management process is available, even before Discord is con
 
 `management.sqlite` holds encrypted credentials, mappings, administrator password hashes, and hashed sessions. Credentials use AES-256-GCM with the separate `master.key` file. Tokens are write-only through the web API and are not returned to the browser. Host access to both the database and key allows credential recovery, so restrict and protect backups.
 
-Each mapping has its own `routes/<mapping-id>.sqlite` with issue/thread links, comment/message links, delivery deduplication, and retry jobs. Issue numbers therefore never collide across repositories. An existing single-repository `.env` is imported once, and its original `sync.sqlite` path is retained so mappings and pending work survive the upgrade. The environment file is not modified by migration.
+Each mapping has its own `routes/<mapping-id>.sqlite` with issue/thread links, comment/message links, delivery deduplication, and retry jobs. Issue numbers therefore never collide across repositories. Mapping state files remain at their existing paths across deployment updates. Environment configuration is not imported into application credentials.
 
 Back up the **whole data directory**, including `master.key`, while the service is stopped. Preserve any SQLite `-wal` and `-shm` files present. Losing the key makes saved credentials unusable; the application refuses to silently replace a missing key when encrypted credentials exist. `docker compose down -v` erases state and should not be used during normal updates.
 
@@ -180,4 +182,4 @@ pnpm smoke
 pnpm dev
 ```
 
-Tests cover durable recovery, edits, echo prevention, safe deletion, queue persistence, repository isolation, webhook routing, administrator bootstrap restrictions, session/CSRF protection, encrypted credential storage, and legacy configuration migration. CI also builds and smoke-tests the production Docker image. Live Discord/GitHub tests require your real credentials and chosen mappings.
+Tests cover durable recovery, edits, echo prevention, safe deletion, queue persistence, repository isolation, webhook routing, administrator bootstrap restrictions, session/CSRF protection, encrypted credential storage, installation-token rotation and scope restriction. CI also builds and smoke-tests the production Docker image. Live Discord/GitHub tests require your real credentials and chosen mappings.

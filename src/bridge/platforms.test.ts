@@ -9,7 +9,7 @@ function setup() {
     owner: "owner",
     repo: "repo",
     forum: "forum",
-    token: "test",
+    readToken: async () => "test",
   });
   const forum = {
     availableTags: [],

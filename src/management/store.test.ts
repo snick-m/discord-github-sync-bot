@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { ManagementStore, Mapping } from "./store";
 import { Store } from "../bridge/database";
-import { importLegacy, initializeAdmin } from "./import";
+import { initializeAdmin } from "./import";
 const resources: { store: ManagementStore; directory: string }[] = [];
 function setup() {
   const directory = mkdtempSync(path.join(tmpdir(), "manager-"));
@@ -57,14 +57,8 @@ describe("management persistence", () => {
   it("encrypts saved tokens and never includes them in credential metadata", () => {
     const { store, directory } = setup();
     const token = "github_pat_private_test_value";
-    const credential = store.saveCredential({
-      label: "Org",
-      owner: "org",
-      login: "alice",
-      token,
-    });
-    expect(JSON.stringify(store.credentials())).not.toContain(token);
-    expect(store.secret(`github:${credential.id}`)).toBe(token);
+    store.saveSecret("githubAppPrivateKey", token);
+    expect(store.secret("githubAppPrivateKey")).toBe(token);
     expect(
       store.db.prepare("SELECT value FROM vault").get()!.value,
     ).not.toContain(token);
@@ -115,7 +109,6 @@ describe("management persistence", () => {
       owner: "org",
       repo: "one",
       channel: "11111",
-      credential: "credential",
       backfill: false,
       enabled: true,
       roles: [],
@@ -154,26 +147,33 @@ describe("management persistence", () => {
       b.close();
     }
   });
-  it("imports a legacy configuration once and preserves the original sync database path", () => {
+  it("removes PAT storage while preserving mappings and other encrypted secrets", () => {
     const { store, directory } = setup();
-    const old = new Store(
-      path.join(directory, "sync.sqlite"),
-      "org/repo:123456",
+    store.db.exec(
+      "CREATE TABLE credentials(id TEXT PRIMARY KEY,data TEXT NOT NULL)",
     );
-    old.close();
-    const env = {
-      DISCORD_TOKEN: "bot-private",
-      GITHUB_ACCESS_TOKEN: "gh-private",
-      GITHUB_USERNAME: "org",
-      GITHUB_REPOSITORY: "repo",
-      DISCORD_CHANNEL_ID: "123456",
-      GITHUB_WEBHOOK_SECRET: "webhook-private",
-    };
-    importLegacy(store, env);
-    importLegacy(store, env);
-    expect(store.mappings()).toHaveLength(1);
-    expect(store.credentials()).toHaveLength(1);
-    expect(store.mappings()[0].file).toBe(path.join(directory, "sync.sqlite"));
-    expect(store.secret("discord")).toBe("bot-private");
+    store.saveSecret("github:old-pat", "pat-secret");
+    store.saveSecret("discord", "keep-bot");
+    store.saveMapping({
+      id: "route",
+      owner: "org",
+      repo: "repo",
+      channel: "123456",
+      enabled: true,
+      backfill: false,
+      roles: [],
+    });
+    store.close();
+    resources.pop();
+    const reopened = new ManagementStore(directory);
+    resources.push({ store: reopened, directory });
+    expect(reopened.secret("github:old-pat")).toBeUndefined();
+    expect(reopened.secret("discord")).toBe("keep-bot");
+    expect(reopened.mapping("route")?.repo).toBe("repo");
+    expect(
+      reopened.db
+        .prepare("SELECT name FROM sqlite_master WHERE name='credentials'")
+        .get(),
+    ).toBeUndefined();
   });
 });

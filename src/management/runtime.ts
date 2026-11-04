@@ -17,6 +17,7 @@ import { Mapping, ManagementStore } from "./store";
 import { Task } from "../bridge/types";
 
 import { WriteBlocked } from "../bridge/authorship";
+import { GitHubInstallations } from "./installations";
 import { GitHubAccounts } from "./accounts";
 import { accountCommand, githubCommand } from "./accountCommands";
 
@@ -41,6 +42,7 @@ export class Runtime {
     readonly management: ManagementStore,
     readonly interval: number,
     readonly accounts?: GitHubAccounts,
+    readonly installations?: GitHubInstallations,
   ) {
     this.refreshStores();
   }
@@ -255,12 +257,9 @@ export class Runtime {
       for (const worker of this.workers.values()) {
         if (!worker.mapping.enabled) continue;
         const mapping = worker.mapping;
-        const credential = this.management.credential(mapping.credential);
-        const githubToken = this.management.secret(
-          `github:${mapping.credential}`,
-        );
-        if (!credential || !githubToken) {
-          worker.error = "Select an available GitHub credential.";
+        if (!this.installations?.config().configured) {
+          worker.error =
+            "Configure the GitHub App ID and private key in the dashboard.";
           continue;
         }
         const api = new LivePlatforms(
@@ -269,7 +268,10 @@ export class Runtime {
             owner: mapping.owner,
             repo: mapping.repo,
             forum: mapping.channel,
-            token: githubToken,
+            readToken: () =>
+              this.installations!.repositoryToken(mapping.owner, mapping.repo),
+            invalidateReadToken: () =>
+              this.installations!.invalidate(mapping.owner, mapping.repo),
           },
           this.accounts,
         );
@@ -283,7 +285,7 @@ export class Runtime {
           const err = error as { message?: string; status?: number };
           worker.error = err.message?.startsWith("Missing forum permissions:")
             ? err.message
-            : `Unable to initialize. Check repository access, organization approval, and forum permissions.${err.status ? ` HTTP ${err.status}.` : ""}`;
+            : `Unable to initialize. Check repository access, app installation, and forum permissions.${err.status ? ` HTTP ${err.status}.` : ""}`;
         }
       }
       const command = new SlashCommandBuilder()

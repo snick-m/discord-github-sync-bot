@@ -5,6 +5,7 @@ const calls = vi.hoisted(
 );
 vi.mock("@octokit/rest", () => ({
   Octokit: class {
+    hook = { wrap: vi.fn() };
     issues: Record<string, (args: unknown) => Promise<unknown>>;
     constructor(options: { auth: string }) {
       this.issues = Object.fromEntries(
@@ -68,13 +69,18 @@ function setup(token?: string) {
   };
   const api = new LivePlatforms(
     {} as Client,
-    { owner: "o", repo: "r", forum: "f", token: "shared-pat" },
+    {
+      owner: "o",
+      repo: "r",
+      forum: "f",
+      readToken: async () => "installation-read",
+    },
     authorship,
   );
   return { api, authorship };
 }
 describe("strict Discord user writes", () => {
-  it("blocks every GitHub mutation without a linked user, without touching the shared PAT", async () => {
+  it("blocks every GitHub mutation without a linked user, without using the installation token", async () => {
     const { api } = setup();
     const operations = [
       () =>
@@ -116,7 +122,7 @@ describe("strict Discord user writes", () => {
     ]);
     expect(calls.every((c) => c.token === "user-token")).toBe(true);
   });
-  it("does not retry permission failures using shared credentials", async () => {
+  it("does not retry permission failures using installation credentials", async () => {
     const { api } = setup("denied");
     await expect(api.createComment(1, "body", source)).rejects.toMatchObject({
       reason: "permission",

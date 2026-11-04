@@ -2,11 +2,12 @@ import express, { Request, Response } from "express";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { ManagementStore } from "./store";
 import { Runtime } from "./runtime";
-import { validateDiscord, validateGithub } from "./providers";
+import { validateDiscord } from "./providers";
 import { verifySignature } from "../webhookSignature";
 import { linkPage, linkCss } from "./linkPages";
 import { html, css, js } from "./ui";
 
+import { GitHubInstallations } from "./installations";
 import { GitHubAccounts } from "./accounts";
 
 class PublicError extends Error {
@@ -20,6 +21,7 @@ class PublicError extends Error {
 interface Options {
   bootstrap: boolean;
   accounts?: GitHubAccounts;
+  installations?: GitHubInstallations;
   publicUrl?: string;
 }
 export type Control = Pick<
@@ -57,7 +59,7 @@ export function createManagementServer(
   store: ManagementStore,
   runtime: Control,
   options: Options,
-  providers = { validateDiscord, validateGithub },
+  providers = { validateDiscord },
 ) {
   const app = express();
   app.disable("x-powered-by");
@@ -275,6 +277,14 @@ export function createManagementServer(
           res.json({ ok: true });
           return;
         }
+        if (
+          ["installation", "installation_repositories"].includes(event ?? "")
+        ) {
+          options.installations?.clear();
+          void runtime.reload();
+          res.status(202).json({ ok: true });
+          return;
+        }
         const name = payload?.repository?.full_name;
         if (typeof name !== "string") {
           res.status(400).json({ error: "Missing repository" });
@@ -453,7 +463,7 @@ export function createManagementServer(
   app.get("/api/state", (_req, res) =>
     res.json({
       ...runtime.status(),
-      credentials: store.credentials(),
+      githubInstallation: options.installations?.config(),
       githubApp: accounts
         ? { ...accounts.app(), callbackUrl: accounts.callbackUrl }
         : undefined,
@@ -487,6 +497,7 @@ export function createManagementServer(
       } catch (error) {
         throw new PublicError((error as Error).message);
       }
+      void runtime.reload();
       res.json({ ok: true });
     }),
   );
@@ -530,91 +541,68 @@ export function createManagementServer(
     }),
   );
   app.post(
-    "/api/credentials",
+    "/api/github-installation",
     action(async (req, res) => {
-      const id = field(req.body, "id", true),
-        label = field(req.body, "label"),
-        owner = field(req.body, "owner"),
-        value = field(req.body, "token", false, 4096);
-      if (!/^[a-zA-Z0-9-]+$/.test(owner))
-        throw new PublicError("Invalid GitHub resource owner.");
-      const previous = id ? store.credential(id) : undefined;
-      if (id && !previous) throw new PublicError("Credential not found.", 404);
-      if (
-        previous &&
-        previous.owner.toLowerCase() !== owner.toLowerCase() &&
-        store.mappings().some((m) => m.credential === id)
-      )
-        throw new PublicError(
-          "A credential used by mappings must keep the same resource owner.",
-        );
-      let validated;
+      if (!options.installations)
+        throw new PublicError("Installation access is unavailable.", 503);
       try {
-        validated = await providers.validateGithub(value, owner);
-      } catch {
-        throw new PublicError(
-          "GitHub could not validate repository access. Check the token's resource owner, selected repositories, Issues permissions, and organization approval.",
+        await options.installations.configure(
+          field(req.body, "appId", false, 20),
+          field(req.body, "privateKey", true, 16384, false) || undefined,
         );
+      } catch (error) {
+        throw new PublicError((error as Error).message);
       }
-      const credential = store.saveCredential({
-        id: id || undefined,
-        label,
-        owner,
-        token: value,
-        login: validated.login,
-      });
       void runtime.reload();
-      res.status(previous ? 200 : 201).json({ credential });
+      res.json({ ok: true });
     }),
   );
-  app.delete(
-    "/api/credentials/:id",
-    action((req, res) => {
-      const id = String(req.params.id);
-      if (store.mappings().some((m) => m.credential === id))
-        throw new PublicError(
-          "This credential is used by a mapping. Replace its token instead.",
-        );
-      store.removeCredential(id);
-      res.json({ ok: true });
+  app.get(
+    "/api/installations",
+    action(async (_req, res) => {
+      if (!options.installations)
+        throw new PublicError("Configure the GitHub App first.", 503);
+      try {
+        res.json({
+          installations: await options.installations.installations(),
+        });
+      } catch (error) {
+        throw new PublicError((error as Error).message);
+      }
     }),
   );
   app.get(
     "/api/repositories",
     action(async (req, res) => {
-      const credential = store.credential(String(req.query.credential ?? ""));
-      if (!credential) throw new PublicError("Credential not found.", 404);
+      if (!options.installations)
+        throw new PublicError("Configure the GitHub App first.", 503);
+      const installation = Number(req.query.installation);
       try {
-        const result = await providers.validateGithub(
-          store.secret(`github:${credential.id}`)!,
-          credential.owner,
-        );
-        res.json({ repositories: result.repositories });
-      } catch {
-        throw new PublicError(
-          "Repository discovery failed. Check token expiration, selected repositories, and organization approval.",
-        );
+        res.json({
+          repositories: await options.installations.repositories(installation),
+        });
+      } catch (error) {
+        throw new PublicError((error as Error).message);
       }
     }),
   );
   app.post(
     "/api/mappings",
     action(async (req, res) => {
-      const credentialId = field(req.body, "credential"),
+      const installation = Number(req.body.installation),
         repository = field(req.body, "repository", false, 201),
         channel = field(req.body, "channel", false, 25);
-      const credential = store.credential(credentialId);
-      if (!credential) throw new PublicError("Credential not found.", 404);
+      if (!options.installations)
+        throw new PublicError("Configure the GitHub App first.", 503);
       const [owner, repo, ...rest] = repository.split("/");
       if (
         rest.length ||
         !owner ||
         !repo ||
-        owner.toLowerCase() !== credential.owner.toLowerCase()
+        !/^[a-zA-Z0-9-]+$/.test(owner) ||
+        !/^[-.\w]+$/.test(repo)
       )
-        throw new PublicError(
-          "Select a repository owned by this credential's resource owner.",
-        );
+        throw new PublicError("Select a valid owner/repository.");
       if (!/^\d{5,25}$/.test(channel))
         throw new PublicError("Invalid Discord forum.");
       const channels = await runtime.channels();
@@ -624,20 +612,17 @@ export function createManagementServer(
         );
       let validated;
       try {
-        validated = await providers.validateGithub(
-          store.secret(`github:${credential.id}`)!,
-          credential.owner,
-        );
+        validated = await options.installations.repositories(installation);
       } catch {
         throw new PublicError("Unable to check repository access.");
       }
       if (
-        !validated.repositories.some(
+        !validated.some(
           (r) => r.fullName.toLowerCase() === repository.toLowerCase(),
         )
       )
         throw new PublicError(
-          "Repository is not accessible through this credential.",
+          "Repository is not accessible through this app installation.",
         );
       if (
         store
@@ -661,7 +646,6 @@ export function createManagementServer(
         owner,
         repo,
         channel,
-        credential: credentialId,
         backfill: req.body.backfill === true,
         enabled: true,
         roles: roles(req.body.roles),

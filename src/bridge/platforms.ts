@@ -11,11 +11,16 @@ import { uploadToR2 } from "../r2";
 import { chunks, issueSummary, missing, sourceBody } from "./content";
 import { Comment, Issue, Link, Message, Platforms, Post } from "./types";
 
-type Options = { owner: string; repo: string; forum: string; token: string };
+type Options = {
+  owner: string;
+  repo: string;
+  forum: string;
+  readToken: () => Promise<string>;
+  invalidateReadToken?: () => void;
+};
 
 export class LivePlatforms implements Platforms {
   readonly github: Octokit;
-  private githubLogin = "";
   private forum!: ForumChannel;
   private hostedAttachments = new Map<string, string>();
   constructor(
@@ -24,8 +29,18 @@ export class LivePlatforms implements Platforms {
     private authorship?: Authorship,
   ) {
     this.github = new Octokit({
-      auth: options.token,
       request: { timeout: 30_000 },
+    });
+    this.github.hook.wrap("request", async (request, requestOptions) => {
+      requestOptions.headers.authorization = `Bearer ${await options.readToken()}`;
+      try {
+        return await request(requestOptions);
+      } catch (error) {
+        if ((error as { status?: number }).status !== 401) throw error;
+        options.invalidateReadToken?.();
+        requestOptions.headers.authorization = `Bearer ${await options.readToken()}`;
+        return request(requestOptions);
+      }
     });
   }
   async initialize() {
@@ -46,7 +61,6 @@ export class LivePlatforms implements Platforms {
       .map(([name]) => name);
     if (absent.length)
       throw new Error(`Missing forum permissions: ${absent.join(", ")}`);
-    this.githubLogin = (await this.github.users.getAuthenticated()).data.login;
     // Fail before accepting work if repository access is misconfigured.
     await this.github.repos.get(this.repo);
   }
@@ -79,7 +93,7 @@ export class LivePlatforms implements Platforms {
         String(data.user?.id ?? ""),
         `${this.options.owner}/${this.options.repo}`,
       ),
-      own: data.user?.login === this.githubLogin,
+      own: false,
       state: data.state === "closed" ? "closed" : "open",
       labels: data.labels
         .map((l) => (typeof l === "string" ? l : (l.name ?? "")))
@@ -240,7 +254,7 @@ export class LivePlatforms implements Platforms {
       body: c.body ?? "",
       author: c.user?.login ?? "unknown",
       url: c.html_url,
-      own: c.user?.login === this.githubLogin,
+      own: false,
       authorId: c.user?.id === undefined ? undefined : String(c.user.id),
       relay: this.authorship?.verify(
         c.body ?? "",

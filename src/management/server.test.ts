@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createManagementServer, Control } from "./server";
 import { ManagementStore } from "./store";
+import { GitHubInstallations } from "./installations";
 import { GitHubAccounts } from "./accounts";
 import { Store } from "../bridge/database";
 const resources: {
@@ -34,19 +35,32 @@ function setup() {
   };
   const providers = {
     validateDiscord: vi.fn(async () => "Bot"),
-    validateGithub: vi.fn(async () => ({
-      login: "alice",
-      repositories: [
-        { fullName: "org/one", name: "one", private: true },
-        { fullName: "org/two", name: "two", private: true },
-      ],
+  };
+  const installations = {
+    config: vi.fn(() => ({
+      appId: "123",
+      configured: true,
+      generation: "test",
     })),
+    configure: vi.fn(async () => {}),
+    installations: vi.fn(async () => [
+      { id: 1, owner: "org", selection: "selected", suspended: false },
+    ]),
+    repositories: vi.fn(async () => [
+      { id: 11, fullName: "org/one", name: "one", private: true },
+      { id: 12, fullName: "org/two", name: "two", private: true },
+    ]),
   };
   const accounts = new GitHubAccounts(store, "https://gitissues.example.com");
   const publicApp = createManagementServer(
     store,
     control,
-    { bootstrap: false, publicUrl: "https://gitissues.example.com", accounts },
+    {
+      bootstrap: false,
+      publicUrl: "https://gitissues.example.com",
+      accounts,
+      installations: installations as unknown as GitHubInstallations,
+    },
     providers,
   );
   const local = createManagementServer(
@@ -66,6 +80,7 @@ function setup() {
   return {
     store,
     accounts,
+    installations,
     directory,
     states,
     control,
@@ -254,7 +269,6 @@ describe("management API", () => {
       owner: "org",
       repo: "one",
       channel: "123456",
-      credential: "credential",
       backfill: false,
       enabled: false,
       roles: [],
@@ -283,19 +297,62 @@ describe("management API", () => {
     expect((await send("org/one")).body.ignored).toBe(true);
     expect((await send("org/not-mapped")).status).toBe(403);
   });
-  it("never saves rejected credentials", async () => {
-    const { publicApp, auth, headers, providers, store } = setup();
+  it("keeps the private-key endpoint authenticated and never returns the saved key", async () => {
+    const { publicApp, auth, headers, installations } = setup();
+    const body = { appId: "123", privateKey: "test-only-private-key" };
+    expect(
+      (
+        await request(publicApp)
+          .post("/api/github-installation")
+          .set(headers)
+          .send(body)
+      ).status,
+    ).toBe(401);
     const cookie = auth();
-    providers.validateGithub.mockRejectedValueOnce(
-      new Error("remote rejected private-token"),
-    );
     const response = await request(publicApp)
-      .post("/api/credentials")
+      .post("/api/github-installation")
       .set({ ...headers, Cookie: cookie })
-      .send({ label: "Org", owner: "org", token: "private-token" });
-    expect(response.status).toBe(400);
-    expect(JSON.stringify(response.body)).not.toContain("private-token");
-    expect(store.credentials()).toHaveLength(0);
+      .send(body);
+    expect(response.status).toBe(200);
+    expect(installations.configure).toHaveBeenCalledWith(
+      "123",
+      "test-only-private-key",
+    );
+    const state = await request(publicApp)
+      .get("/api/state")
+      .set({ ...headers, Cookie: cookie });
+    expect(state.body.githubInstallation).toMatchObject({
+      appId: "123",
+      configured: true,
+    });
+    expect(state.text).not.toContain(body.privateKey);
+  });
+  it("removes PAT endpoints and exposes installation discovery only to administrators", async () => {
+    const { publicApp, auth, headers, installations } = setup();
+    expect(
+      (await request(publicApp).get("/api/installations").set(headers)).status,
+    ).toBe(401);
+    const cookie = auth();
+    expect(
+      (
+        await request(publicApp)
+          .post("/api/credentials")
+          .set({ ...headers, Cookie: cookie })
+          .send({ token: "pat" })
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await request(publicApp)
+          .get("/api/installations")
+          .set({ ...headers, Cookie: cookie })
+      ).body.installations[0].owner,
+    ).toBe("org");
+    const repos = await request(publicApp)
+      .get("/api/repositories?installation=1")
+      .set({ ...headers, Cookie: cookie });
+    expect(repos.body.repositories).toHaveLength(2);
+    expect(installations.repositories).toHaveBeenCalledWith(1);
   });
   it("invalidates sessions on logout and rejects expired sessions", async () => {
     const { publicApp, auth, headers, store } = setup();
@@ -419,13 +476,6 @@ describe("management API", () => {
   it("accepts secrets once, validates access, and never returns them in state", async () => {
     const { publicApp, auth, headers, store, providers } = setup();
     const cookie = auth();
-    const token = "github_pat_never-return-this";
-    const saved = await request(publicApp)
-      .post("/api/credentials")
-      .set({ ...headers, Cookie: cookie })
-      .send({ label: "Org token", owner: "org", token });
-    expect(saved.status).toBe(201);
-    expect(JSON.stringify(saved.body)).not.toContain(token);
     const botToken = "discord-never-return-this";
     expect(
       (
@@ -439,22 +489,14 @@ describe("management API", () => {
     const state = await request(publicApp)
       .get("/api/state")
       .set({ ...headers, Cookie: cookie });
-    expect(JSON.stringify(state.body)).not.toContain(token);
     expect(JSON.stringify(state.body)).not.toContain(botToken);
     expect(JSON.stringify(state.body)).not.toContain("webhook-private-secret");
-    expect(store.secret(`github:${saved.body.credential.id}`)).toBe(token);
   });
   it("validates repository access and prevents duplicate channel mappings", async () => {
     const { publicApp, auth, headers, store } = setup();
     const cookie = auth();
-    const credential = store.saveCredential({
-      label: "Org",
-      owner: "org",
-      login: "alice",
-      token: "private",
-    });
     const body = {
-      credential: credential.id,
+      installation: 1,
       repository: "org/one",
       channel: "123456",
       backfill: false,
@@ -511,7 +553,6 @@ describe("management API", () => {
         owner: "org",
         repo,
         channel,
-        credential: "credential",
         backfill: false,
         enabled: true,
         roles: [],

@@ -12,18 +12,11 @@ import {
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-export interface Credential {
-  id: string;
-  label: string;
-  owner: string;
-  login: string;
-}
 export interface Mapping {
   id: string;
   owner: string;
   repo: string;
   channel: string;
-  credential: string;
   backfill: boolean;
   enabled: boolean;
   roles: string[];
@@ -39,9 +32,11 @@ export class ManagementStore {
       .exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS vault(id TEXT PRIMARY KEY,value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS credentials(id TEXT PRIMARY KEY,data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS mappings(id TEXT PRIMARY KEY,repository TEXT UNIQUE NOT NULL,channel TEXT UNIQUE NOT NULL,data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY,expires INTEGER NOT NULL);`);
+    this.db.exec(
+      "DROP TABLE IF EXISTS credentials; DELETE FROM vault WHERE id LIKE 'github:%'; DELETE FROM settings WHERE key='legacyImported'; UPDATE mappings SET data=json_remove(data,'$.credential')",
+    );
     const keyFile = path.join(directory, "master.key");
     if (!existsSync(keyFile)) {
       if (Number(this.db.prepare("SELECT COUNT(*) AS n FROM vault").get()!.n)) {
@@ -96,46 +91,6 @@ export class ManagementStore {
           .map((b) => b.toString("base64"))
           .join("."),
       );
-  }
-  credentials(): Credential[] {
-    return this.db
-      .prepare("SELECT data FROM credentials")
-      .all()
-      .map((r) => JSON.parse(r.data as string));
-  }
-  credential(id: string) {
-    return this.credentials().find((c) => c.id === id);
-  }
-  saveCredential(
-    input: Omit<Credential, "id"> & { id?: string; token: string },
-  ): Credential {
-    const { token, ...data } = input;
-    const credential = { ...data, id: input.id ?? randomUUID() };
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.saveSecret(`github:${credential.id}`, token);
-      this.db
-        .prepare("INSERT OR REPLACE INTO credentials VALUES (?,?)")
-        .run(credential.id, JSON.stringify(credential));
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    return credential;
-  }
-  removeCredential(id: string) {
-    if (this.mappings().some((m) => m.credential === id))
-      throw new Error("Remove or reassign this credential's mappings first.");
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.db.prepare("DELETE FROM credentials WHERE id=?").run(id);
-      this.db.prepare("DELETE FROM vault WHERE id=?").run(`github:${id}`);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
   }
   mappings(): Mapping[] {
     return this.db

@@ -2,8 +2,9 @@ import { settings } from "./bridge/settings";
 import { ManagementStore } from "./management/store";
 import { Runtime } from "./management/runtime";
 import { createManagementServer } from "./management/server";
-import { importLegacy, initializeAdmin } from "./management/import";
+import { initializeAdmin } from "./management/import";
 
+import { GitHubInstallations } from "./management/installations";
 import { GitHubAccounts } from "./management/accounts";
 
 async function main() {
@@ -11,21 +12,23 @@ async function main() {
   const options = settings();
   const store = new ManagementStore(options.directory);
   initializeAdmin(store);
-  importLegacy(store);
   const accounts = new GitHubAccounts(
     store,
     options.publicUrl.replace(/\/$/, ""),
   );
-  const runtime = new Runtime(store, options.interval, accounts);
+  const installations = new GitHubInstallations(store);
+  const runtime = new Runtime(store, options.interval, accounts, installations);
   const publicServer = createManagementServer(store, runtime, {
     bootstrap: false,
     accounts,
+    installations,
     publicUrl: options.publicUrl,
   }).listen(options.port, "0.0.0.0");
   // Bootstrap is a separate loopback-only listener and is never routed through Cloudflare.
   const setupServer = createManagementServer(store, runtime, {
     bootstrap: true,
     accounts,
+    installations,
     publicUrl: options.publicUrl,
   }).listen(options.setupPort, "127.0.0.1");
   let stopping = false;
