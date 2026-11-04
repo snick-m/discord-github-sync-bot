@@ -15,11 +15,29 @@ Based on [Sillhouette/discord-github-sync-bot](https://github.com/Sillhouette/di
 
 The application starts with an **empty `.env`**. Discord tokens, GitHub tokens, and repository mappings belong in the management UI. Environment variables now configure only deployment options such as the public URL, ports, storage, and optional R2 uploads.
 
+## GitHub account linking (required for Discord writes)
+
+Register a GitHub App under your organization or account and install it on the selected repositories:
+
+- Homepage: your public bridge URL.
+- User authorization callback: `https://gitissues.rmush.dev/auth/github/callback` (replace the hostname for another deployment).
+- Repository permissions: **Issues: read and write**, Metadata: read.
+- Enable expiring user access tokens. A private key is not needed for this user-token flow.
+- Webhook URL: the dashboard’s `/github-webhook` URL, with the same shared webhook secret configured in the dashboard. Authorization revocation events invalidate linked tokens; Issues and Issue comments events can also use this endpoint.
+
+Enter the App’s **client ID**, **slug**, and **client secret** in the dashboard’s account-linking section. The secret and member tokens are encrypted at rest and never returned by the API. Changing the client ID requires members to authorize again.
+
+Each member runs `/github link`, opens the private single-use URL, authorizes on GitHub, then runs `/github confirm` and confirms the displayed GitHub account in Discord. `/github status` shows their link; `/github unlink` deletes their local tokens and pending authorizations. Members can also revoke access in GitHub settings. A GitHub identity may be linked to only one Discord identity.
+
+**There is no shared-token fallback for Discord → GitHub.** New issues, comments, edits, deletion tombstones, and close/reopen actions require the appropriate linked user token and GitHub permissions. Expired, revoked, missing, or unauthorized credentials hold the change. Messages remain in Discord, recent messages get a rate-limited linking notice, and held counts appear in the dashboard. Linking triggers a recovery scan; only surviving source messages are sent. GitHub → Discord continues for GitHub contributors without Discord links. Reactions are not synced.
+
+Writes appear as the actual GitHub user (with GitHub’s app attribution). Existing posts authored by the previous bridge account keep their original author; GitHub does not permit changing authorship, and their edits may require permissions the linked member does not have.
+
 ## GitHub organization tokens
 
-Fine-grained PATs are supported. Create one under a user account, select your **organization as resource owner**, choose the repositories you want, and grant **Issues: read and write** plus the default Metadata permission. An organization may require approval before the token can access private resources, including after access changes. The underlying user's own access and the organization's token policy still apply.
+Fine-grained PATs are supported. Create one under a user account, select your **organization as resource owner**, choose the repositories you want, and grant **Issues: read** plus the default Metadata permission. An organization may require approval before the token can access private resources, including after access changes. The underlying user's own access and the organization's token policy still apply.
 
-One such token can serve multiple mapped repositories in that organization. In the management page, use the organization name in **Resource owner**. The app validates repository discovery and offers accessible, non-archived repositories with issues enabled. GitHub enforces write permissions when processing changes; an inaccessible/expired token is reported in mapping status or the retry queue.
+One such token can serve multiple mapped repositories in that organization. In the management page, use the organization name in **Resource owner**. The app validates repository discovery and offers accessible, non-archived repositories with issues enabled. This token is used only for repository reads. All Discord-originated writes use the linked member’s GitHub App user token. An inaccessible/expired reading token is reported in mapping status or the retry queue.
 
 A PAT still belongs to a user and actions appear under that user's identity. A GitHub App is the appropriate future option for a separate bot identity or centrally managed installation permissions. This version does not impersonate an organization.
 
@@ -80,7 +98,7 @@ The forum is a publishing boundary: human-created posts and replies are eligible
 - Deleted source comments/messages become deletion notices in their mirrors. Deleting an entire thread/issue disables its mapping; it does not delete its counterpart or recreate the removed object.
 - Outbound Discord messages disable mentions, including edits.
 
-**Archiving is not closure.** Inactivity auto-archive never changes GitHub state. Use `/issue close` or `/issue reopen`. Inside a synced thread the repository is inferred; elsewhere specify `repository:owner/repo` and `number:123` when multiple repositories are mapped. Close/reopen require access to the forum plus Manage Threads there or one of its configured manager roles. `/issue status` shows the linked issue.
+**Archiving is not closure.** Inactivity auto-archive never changes GitHub state. Use `/issue close` or `/issue reopen`. Inside a synced thread the repository is inferred; elsewhere specify `repository:owner/repo` and `number:123` when multiple repositories are mapped. Close/reopen require a linked GitHub account with repository permission, plus access to the forum and Manage Threads there or one of its configured manager roles. `/issue status` shows the linked issue.
 
 ## Webhooks and polling
 

@@ -16,6 +16,10 @@ import { issueCommand } from "../bridge/commands";
 import { Mapping, ManagementStore } from "./store";
 import { Task } from "../bridge/types";
 
+import { WriteBlocked } from "../bridge/authorship";
+import { GitHubAccounts } from "./accounts";
+import { accountCommand, githubCommand } from "./accountCommands";
+
 interface Worker {
   mapping: Mapping;
   store: Store;
@@ -36,6 +40,7 @@ export class Runtime {
   constructor(
     readonly management: ManagementStore,
     readonly interval: number,
+    readonly accounts?: GitHubAccounts,
   ) {
     this.refreshStores();
   }
@@ -165,6 +170,18 @@ export class Runtime {
         this.discordError = "Discord connection error; reconnecting.";
       });
       client.on(Events.InteractionCreate, async (interaction) => {
+        try {
+          if (
+            this.accounts &&
+            (await accountCommand(interaction, this.accounts, () =>
+              this.resumeHeld(),
+            ))
+          )
+            return;
+        } catch {
+          // An expired interaction must not stop the gateway or the worker.
+          return;
+        }
         if (
           !interaction.isChatInputCommand() ||
           interaction.commandName !== "issue"
@@ -196,6 +213,7 @@ export class Runtime {
           await issueCommand(interaction, worker.store, worker.api, {
             forum: worker.mapping.channel,
             roles: worker.mapping.roles,
+            authorize: async (id) => Boolean(await this.accounts?.access(id)),
           });
         } catch {
           const text =
@@ -245,12 +263,16 @@ export class Runtime {
           worker.error = "Select an available GitHub credential.";
           continue;
         }
-        const api = new LivePlatforms(client, {
-          owner: mapping.owner,
-          repo: mapping.repo,
-          forum: mapping.channel,
-          token: githubToken,
-        });
+        const api = new LivePlatforms(
+          client,
+          {
+            owner: mapping.owner,
+            repo: mapping.repo,
+            forum: mapping.channel,
+            token: githubToken,
+          },
+          this.accounts,
+        );
         try {
           await api.initialize();
           worker.api = api;
@@ -286,11 +308,26 @@ export class Runtime {
                 ),
             ),
         );
-      for (const guild of guilds)
-        await client.application!.commands.create(command.toJSON(), guild);
+      for (const guild of client.guilds.cache.keys()) {
+        await client.application!.commands.create(
+          githubCommand.toJSON(),
+          guild,
+        );
+        if (guilds.has(guild))
+          await client.application!.commands.create(command.toJSON(), guild);
+      }
     } finally {
       this.reloading = false;
     }
+  }
+  resumeHeld() {
+    for (const worker of this.workers.values())
+      if (worker.mapping.enabled) {
+        worker.store.enqueue({ type: "scan" }, randomUUID());
+        worker.store.db.exec(
+          "UPDATE jobs SET attempts=0,failed=0,next_at=0 WHERE json_extract(payload, '$.type') = 'state'",
+        );
+      }
   }
   status() {
     return {
@@ -359,6 +396,12 @@ export class Runtime {
           await worker.engine.run(job.task);
           worker.store.complete(job.id);
         } catch (error) {
+          if (error instanceof WriteBlocked) {
+            worker.store.db
+              .prepare("UPDATE jobs SET failed=1,error=? WHERE id=?")
+              .run(error.message, job.id);
+            continue;
+          }
           const err = error as {
             status?: number;
             response?: { headers?: Record<string, string> };

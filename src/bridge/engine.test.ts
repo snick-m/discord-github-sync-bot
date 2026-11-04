@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { WriteBlocked } from "./authorship";
 import { Engine } from "./engine";
 import { Store } from "./database";
 import { chunks, issueMarker, issueSummary, messageMarker } from "./content";
@@ -160,6 +161,89 @@ afterEach(() => {
 });
 
 describe("durable bridge", () => {
+  it("holds an unlinked comment without blocking others, then sends it once after linking", async () => {
+    const { engine, api, store } = setup();
+    const issue = api.addIssue();
+    await engine.github(issue.number);
+    const thread = store.link(issue.number)!.thread;
+    const held = api.addMessage(thread, "held");
+    const allowed = api.addMessage(thread, "allowed");
+    const create = api.createComment.getMockImplementation()!;
+    let linked = false;
+    api.createComment.mockImplementation(async (number, body) => {
+      if (body.includes(messageMarker(held.id)) && !linked)
+        throw new WriteBlocked("123", "link", "link required");
+      return create(number, body);
+    });
+    await engine.discord(thread);
+    expect(store.health().blocked).toBe(1);
+    expect(store.mirror(`discord:${held.id}`)).toBeUndefined();
+    expect(store.mirror(`discord:${allowed.id}`)).toBeDefined();
+    linked = true;
+    await engine.discord(thread);
+    await engine.discord(thread);
+    expect(store.health().blocked).toBe(0);
+    expect(
+      (api.commentsByIssue.get(issue.number) ?? []).filter((c) =>
+        c.body.includes(messageMarker(held.id)),
+      ),
+    ).toHaveLength(1);
+  });
+  it("clears held changes for source messages deleted before authorization", async () => {
+    const { engine, api, store } = setup();
+    const issue = api.addIssue();
+    await engine.github(issue.number);
+    const thread = store.link(issue.number)!.thread;
+    const message = api.addMessage(thread, "delete me");
+    api.createComment.mockRejectedValue(
+      new WriteBlocked("123", "link", "link required"),
+    );
+    await engine.discord(thread);
+    expect(store.health().blocked).toBe(1);
+    api.messagesByThread.set(
+      thread,
+      api.messagesByThread.get(thread)!.filter((m) => m.id !== message.id),
+    );
+    await engine.discord(thread);
+    expect(store.health().blocked).toBe(0);
+  });
+  it("passes the Discord actor to state writes and preserves blocked commands for retry", async () => {
+    const { engine, api, store } = setup();
+    const issue = api.addIssue();
+    await engine.github(issue.number);
+    api.state.mockRejectedValue(
+      new WriteBlocked("123", "link", "link required"),
+    );
+    await expect(
+      engine.run({
+        type: "state",
+        issue: issue.number,
+        state: "closed",
+        actor: "123",
+      }),
+    ).rejects.toBeInstanceOf(WriteBlocked);
+    expect(api.state).toHaveBeenCalledWith(issue.number, "closed", "123");
+    expect(store.health().blocked).toBe(1);
+  });
+  it("recovers signed user-authored relays without duplicating or echoing them", async () => {
+    const { engine, api, store } = setup();
+    const post = api.addPost();
+    const writer = { kind: "user" as const, discordId: "123", githubId: "456" };
+    const issue = api.addIssue({
+      own: false,
+      relay: { kind: "thread", sourceId: post.id, writer },
+    });
+    const comment = api.addComment(issue.number, "user authored");
+    comment.relay = { kind: "message", sourceId: "789", writer };
+    await engine.github(issue.number);
+    expect(store.link(issue.number)).toMatchObject({
+      thread: post.id,
+      origin: "discord",
+      writer,
+    });
+    expect(store.mirror(`github:${comment.id}`)).toBeUndefined();
+    expect(api.createPost).not.toHaveBeenCalled();
+  });
   it("repairs a deleted mirror even when the source content hash has not changed", async () => {
     const { engine, api, store } = setup();
     const issue = api.addIssue();

@@ -3,6 +3,7 @@ import {
   createCipheriv,
   createDecipheriv,
   createHash,
+  createHmac,
   randomBytes,
   randomUUID,
   scryptSync,
@@ -214,6 +215,12 @@ export class ManagementStore {
   }
   private sessionHash(token: string) {
     return createHash("sha256").update(token).digest("hex");
+  }
+  sign(payload: string) {
+    const key = createHmac("sha256", this.key)
+      .update("issue-bridge-relay-signing-v1")
+      .digest();
+    return createHmac("sha256", key).update(payload).digest("hex");
   }
   close() {
     this.db.close();

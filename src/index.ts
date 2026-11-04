@@ -4,20 +4,28 @@ import { Runtime } from "./management/runtime";
 import { createManagementServer } from "./management/server";
 import { importLegacy, initializeAdmin } from "./management/import";
 
+import { GitHubAccounts } from "./management/accounts";
+
 async function main() {
   process.umask(0o077);
   const options = settings();
   const store = new ManagementStore(options.directory);
   initializeAdmin(store);
   importLegacy(store);
-  const runtime = new Runtime(store, options.interval);
+  const accounts = new GitHubAccounts(
+    store,
+    options.publicUrl.replace(/\/$/, ""),
+  );
+  const runtime = new Runtime(store, options.interval, accounts);
   const publicServer = createManagementServer(store, runtime, {
     bootstrap: false,
+    accounts,
     publicUrl: options.publicUrl,
   }).listen(options.port, "0.0.0.0");
   // Bootstrap is a separate loopback-only listener and is never routed through Cloudflare.
   const setupServer = createManagementServer(store, runtime, {
     bootstrap: true,
+    accounts,
     publicUrl: options.publicUrl,
   }).listen(options.setupPort, "127.0.0.1");
   let stopping = false;

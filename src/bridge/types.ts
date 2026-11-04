@@ -1,3 +1,4 @@
+import { Relay, Writer } from "./authorship";
 export interface Issue {
   number: number;
   title: string;
@@ -9,6 +10,9 @@ export interface Issue {
   locked: boolean;
   createdAt: string;
   own?: boolean;
+  authorId?: string;
+  writer?: Writer;
+  relay?: Relay;
 }
 export interface Comment {
   id: string;
@@ -16,6 +20,8 @@ export interface Comment {
   url: string;
   author: string;
   own: boolean;
+  authorId?: string;
+  relay?: Relay;
 }
 export interface Post {
   id: string;
@@ -33,6 +39,8 @@ export interface Message {
   author: string;
   bot: boolean;
   own?: boolean;
+  authorId?: string;
+  createdAt?: string;
 }
 export interface Link {
   issue: number;
@@ -40,6 +48,7 @@ export interface Link {
   origin: "github" | "discord";
   starter: string;
   disabled?: boolean;
+  writer?: Writer;
 }
 export interface Mirror {
   key: string;
@@ -48,22 +57,42 @@ export interface Mirror {
   source: string;
   ids: string[];
   hash: string;
+  writer?: Writer;
 }
 export type Task =
   | { type: "github"; issue: number }
   | { type: "discord"; thread: string }
-  | { type: "state"; issue: number; state: "open" | "closed" }
+  | { type: "state"; issue: number; state: "open" | "closed"; actor?: string }
   | { type: "scan" }
   | { type: "unlink"; thread: string };
 export interface Platforms {
   getIssue(number: number): Promise<Issue>;
   issues(since?: string): Promise<Issue[]>;
   createIssue(post: Post, marker: string): Promise<Issue>;
-  editIssue(number: number, body: string): Promise<void>;
-  state(number: number, state: "open" | "closed"): Promise<void>;
+  editIssue(
+    number: number,
+    body: string,
+    writer?: Writer,
+    source?: Message,
+  ): Promise<void>;
+  state(
+    number: number,
+    state: "open" | "closed",
+    actor?: string,
+  ): Promise<void>;
   comments(number: number): Promise<Comment[]>;
-  createComment(number: number, body: string): Promise<string>;
-  editComment(id: string, body: string): Promise<void>;
+  createComment(
+    number: number,
+    body: string,
+    source?: Message,
+  ): Promise<string | { id: string; writer: Writer }>;
+  editComment(
+    id: string,
+    body: string,
+    writer?: Writer,
+    source?: Message,
+  ): Promise<void>;
+  notifyBlocked?(source: Message, message: string): Promise<void>;
   posts(): Promise<Post[]>;
   getPost(thread: string): Promise<Post>;
   createPost(issue: Issue): Promise<Post>;

@@ -6,6 +6,8 @@ import { validateDiscord, validateGithub } from "./providers";
 import { verifySignature } from "../webhookSignature";
 import { html, css, js } from "./ui";
 
+import { GitHubAccounts } from "./accounts";
+
 class PublicError extends Error {
   constructor(
     message: string,
@@ -16,6 +18,7 @@ class PublicError extends Error {
 }
 interface Options {
   bootstrap: boolean;
+  accounts?: GitHubAccounts;
   publicUrl?: string;
 }
 export type Control = Pick<
@@ -86,6 +89,56 @@ export function createManagementServer(
     }
     next();
   });
+  const accounts = options.accounts;
+  if (!options.bootstrap && accounts) {
+    const oauthCookie = (res: Response, value: string, age = 600) =>
+      res.set(
+        "Set-Cookie",
+        `bridge_oauth=${value}; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=${age}`,
+      );
+    app.get("/auth/github/start", (req, res) => {
+      try {
+        const result = accounts.start(String(req.query.ticket ?? ""));
+        oauthCookie(res, result.browser);
+        res.redirect(result.url);
+      } catch {
+        res
+          .status(400)
+          .type("text")
+          .send(
+            "Link expired or invalid. Return to Discord and run /github link again.",
+          );
+      }
+    });
+    app.get("/auth/github/callback", async (req, res) => {
+      const browser =
+        (req.get("cookie") ?? "")
+          .split(";")
+          .map((v) => v.trim())
+          .find((v) => v.startsWith("bridge_oauth="))
+          ?.slice(13) ?? "";
+      oauthCookie(res, "", 0);
+      try {
+        await accounts.callback(
+          String(req.query.state ?? ""),
+          browser,
+          String(req.query.code ?? ""),
+        );
+        res
+          .type("html")
+          .send(
+            '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Confirm in Discord</title><link rel="stylesheet" href="/style.css"><main><section class="panel"><h1>Return to Discord.</h1><p>GitHub authorization succeeded. Run <strong>/github confirm</strong> in Discord and confirm the GitHub account shown there to finish linking.</p></section></main></html>',
+          );
+      } catch {
+        res
+          .status(400)
+          .type("text")
+          .send(
+            "Authorization could not be verified. Return to Discord and run /github link again.",
+          );
+      }
+    });
+  }
   if (!options.bootstrap) {
     app.get("/health", (_req, res) =>
       res.json({ status: "ok", adminConfigured: store.hasAdmin() }),
@@ -121,6 +174,18 @@ export function createManagementServer(
           return;
         }
         if (event === "ping") {
+          res.json({ ok: true });
+          return;
+        }
+        if (
+          event === "github_app_authorization" &&
+          payload.action === "revoked"
+        ) {
+          if (!Number.isSafeInteger(payload.sender?.id)) {
+            res.status(400).json({ error: "Invalid GitHub identity" });
+            return;
+          }
+          accounts?.revokeGithub(String(payload.sender.id));
           res.json({ ok: true });
           return;
         }
@@ -302,10 +367,47 @@ export function createManagementServer(
     res.json({
       ...runtime.status(),
       credentials: store.credentials(),
+      githubApp: accounts
+        ? { ...accounts.app(), callbackUrl: accounts.callbackUrl }
+        : undefined,
+      linkedAccounts:
+        accounts
+          ?.links()
+          .map(({ discord, github, login, status, linkedAt }) => ({
+            discord,
+            github,
+            login,
+            status,
+            linkedAt,
+          })) ?? [],
       webhookConfigured: Boolean(store.secret("webhook")),
       webhookUrl: options.publicUrl
         ? `${new URL(options.publicUrl).origin}/github-webhook`
         : undefined,
+    }),
+  );
+  app.post(
+    "/api/github-app",
+    action((req, res) => {
+      if (!accounts)
+        throw new PublicError("Account linking is unavailable.", 503);
+      try {
+        accounts.saveApp(
+          field(req.body, "clientId"),
+          field(req.body, "slug"),
+          field(req.body, "clientSecret", true, 4096) || undefined,
+        );
+      } catch (error) {
+        throw new PublicError((error as Error).message);
+      }
+      res.json({ ok: true });
+    }),
+  );
+  app.delete(
+    "/api/github-links/:discord",
+    action((req, res) => {
+      accounts?.unlink(String(req.params.discord));
+      res.json({ ok: true });
     }),
   );
   app.get(

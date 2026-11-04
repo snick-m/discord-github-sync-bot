@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createManagementServer, Control } from "./server";
 import { ManagementStore } from "./store";
+import { GitHubAccounts } from "./accounts";
 import { Store } from "../bridge/database";
 const resources: {
   store: ManagementStore;
@@ -41,10 +42,11 @@ function setup() {
       ],
     })),
   };
+  const accounts = new GitHubAccounts(store, "https://gitissues.example.com");
   const publicApp = createManagementServer(
     store,
     control,
-    { bootstrap: false, publicUrl: "https://gitissues.example.com" },
+    { bootstrap: false, publicUrl: "https://gitissues.example.com", accounts },
     providers,
   );
   const local = createManagementServer(
@@ -63,6 +65,7 @@ function setup() {
   };
   return {
     store,
+    accounts,
     directory,
     states,
     control,
@@ -81,6 +84,85 @@ afterEach(() => {
   }
 });
 describe("management API", () => {
+  it("protects app secrets and exposes only account metadata", async () => {
+    const { publicApp, headers, auth } = setup();
+    const body = {
+      clientId: "Iv1.testclient",
+      slug: "test-app",
+      clientSecret: "private-client-secret",
+    };
+    expect(
+      (await request(publicApp).post("/api/github-app").set(headers).send(body))
+        .status,
+    ).toBe(401);
+    const cookie = auth();
+    expect(
+      (
+        await request(publicApp)
+          .post("/api/github-app")
+          .set(headers)
+          .set("Cookie", cookie)
+          .send(body)
+      ).status,
+    ).toBe(200);
+    const state = await request(publicApp)
+      .get("/api/state")
+      .set(headers)
+      .set("Cookie", cookie);
+    expect(state.body.githubApp).toMatchObject({
+      configured: true,
+      callbackUrl: "https://gitissues.example.com/auth/github/callback",
+    });
+    expect(state.text).not.toContain(body.clientSecret);
+  });
+  it("sets a secure OAuth browser cookie and refuses invalid callbacks without an admin session", async () => {
+    const { publicApp, headers, accounts } = setup();
+    accounts.saveApp("Iv1.testclient", "test-app", "private-client-secret");
+    const startUrl = new URL(accounts.begin("123"));
+    const response = await request(publicApp)
+      .get(startUrl.pathname + startUrl.search)
+      .set(headers);
+    expect(response.status).toBe(302);
+    expect(response.headers.location).toMatch(
+      /^https:\/\/github.com\/login\/oauth\/authorize\?/,
+    );
+    expect(String(response.headers["set-cookie"])).toContain(
+      "HttpOnly; Secure; SameSite=Lax",
+    );
+    expect(
+      (
+        await request(publicApp)
+          .get("/auth/github/callback?state=wrong&code=bad")
+          .set(headers)
+      ).status,
+    ).toBe(400);
+    expect(
+      (await request(publicApp).get("/api/state").set(headers)).status,
+    ).toBe(401);
+  });
+  it("accepts signed authorization revocations without a repository and rejects forged ones", async () => {
+    const { publicApp, headers, accounts, store } = setup();
+    store.saveSecret("webhook", "shared-webhook-secret");
+    const revoke = vi.spyOn(accounts, "revokeGithub");
+    const body = JSON.stringify({ action: "revoked", sender: { id: 456 } });
+    const delivery = () =>
+      request(publicApp)
+        .post("/github-webhook")
+        .set(headers)
+        .set("Content-Type", "application/json")
+        .set("x-github-event", "github_app_authorization")
+        .set("x-github-delivery", "revoke-1");
+    expect((await delivery().send(body)).status).toBe(401);
+    expect(revoke).not.toHaveBeenCalled();
+    const signature =
+      "sha256=" +
+      createHmac("sha256", "shared-webhook-secret").update(body).digest("hex");
+    expect(
+      (await delivery().set("x-hub-signature-256", signature).send(body))
+        .status,
+    ).toBe(200);
+    expect(revoke).toHaveBeenCalledWith("456");
+  });
   it("preserves leading and trailing spaces when signing in with an environment-created password", async () => {
     const { store, publicApp, headers } = setup();
     const password = "  environment password  ";

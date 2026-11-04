@@ -6,6 +6,7 @@ import {
   PermissionFlagsBits,
   ThreadChannel,
 } from "discord.js";
+import { Authorship, Writer, WriteBlocked } from "./authorship";
 import { uploadToR2 } from "../r2";
 import { chunks, issueSummary, missing, sourceBody } from "./content";
 import { Comment, Issue, Link, Message, Platforms, Post } from "./types";
@@ -20,6 +21,7 @@ export class LivePlatforms implements Platforms {
   constructor(
     readonly client: Client,
     readonly options: Options,
+    private authorship?: Authorship,
   ) {
     this.github = new Octokit({
       auth: options.token,
@@ -59,7 +61,7 @@ export class LivePlatforms implements Platforms {
     title: string;
     body?: string | null;
     html_url: string;
-    user: { login: string } | null;
+    user: { login: string; id?: number } | null;
     state: string;
     labels: (string | { name?: string })[];
     locked: boolean;
@@ -71,10 +73,16 @@ export class LivePlatforms implements Platforms {
       body: data.body ?? "",
       url: data.html_url,
       author: data.user?.login ?? "unknown",
+      authorId: data.user?.id === undefined ? undefined : String(data.user.id),
+      relay: this.authorship?.verify(
+        data.body ?? "",
+        String(data.user?.id ?? ""),
+        `${this.options.owner}/${this.options.repo}`,
+      ),
       own: data.user?.login === this.githubLogin,
       state: data.state === "closed" ? "closed" : "open",
       labels: data.labels
-        .map((l) => (typeof l === "string" ? l : l.name ?? ""))
+        .map((l) => (typeof l === "string" ? l : (l.name ?? "")))
         .filter(Boolean),
       locked: data.locked,
       createdAt: data.created_at,
@@ -101,35 +109,124 @@ export class LivePlatforms implements Platforms {
     });
     return data.filter((i) => !i.pull_request).map((i) => this.issue(i));
   }
+  private async userWrite<T>(
+    discordId: string | undefined,
+    pinned: Writer | undefined,
+    operation: (api: Octokit, writer: Writer) => Promise<T>,
+  ): Promise<T> {
+    if (!discordId || (pinned?.discordId && pinned.discordId !== discordId))
+      throw new WriteBlocked(
+        discordId,
+        "original-author",
+        "The original Discord author must link their GitHub account before this change can be sent.",
+      );
+    const access = await this.authorship?.access(
+      discordId,
+      pinned?.kind === "user" ? pinned.githubId : undefined,
+    );
+    if (!access)
+      throw new WriteBlocked(
+        discordId,
+        "link",
+        "Link and authorize your GitHub account with /github link, then /github confirm. This change has not been sent to GitHub.",
+      );
+    const writer: Writer = {
+      kind: "user",
+      discordId,
+      githubId: access.githubId,
+      login: access.login,
+    };
+    const api = new Octokit({
+      auth: access.token,
+      request: { timeout: 30_000 },
+    });
+    try {
+      return await operation(api, writer);
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      if (status === 401) {
+        this.authorship?.invalidate(discordId, access.githubId);
+        throw new WriteBlocked(
+          discordId,
+          "link",
+          "Your GitHub authorization expired or was revoked. Run /github link again; this change has not been sent.",
+        );
+      }
+      if (status === 403 || status === 404)
+        throw new WriteBlocked(
+          discordId,
+          "permission",
+          "Your GitHub account or GitHub App is not authorized for this repository/action. Check repository access and the app installation. This change has not been sent.",
+        );
+      throw error;
+    }
+  }
+  private signed(
+    body: string,
+    kind: "thread" | "message",
+    sourceId: string | undefined,
+    writer: Writer | undefined,
+  ) {
+    if (!sourceId || !writer) return body;
+    const marker = this.authorship?.sign(
+      { kind, sourceId, writer },
+      `${this.options.owner}/${this.options.repo}`,
+    );
+    return marker ? `${body}\n\n${marker}` : body;
+  }
   async createIssue(post: Post, marker: string) {
-    // Only map tags to existing labels: typos must not silently create new labels.
-    const available = await this.github.paginate(
-      this.github.issues.listLabelsForRepo,
-      { ...this.repo, per_page: 100 },
+    return this.userWrite(
+      post.starter.authorId,
+      undefined,
+      async (api, writer) => {
+        const available = await api.paginate(api.issues.listLabelsForRepo, {
+          ...this.repo,
+          per_page: 100,
+        });
+        const labels = post.tags.filter((tag) =>
+          available.some((label) => label.name === tag),
+        );
+        const { data } = await api.issues.create({
+          ...this.repo,
+          title: post.title,
+          labels,
+          body: this.signed(
+            `${sourceBody(post.starter)}\n\n${marker}`,
+            "thread",
+            post.id,
+            writer,
+          ),
+        });
+        return { ...this.issue(data), writer };
+      },
     );
-    const labels = post.tags.filter((tag) =>
-      available.some((l) => l.name === tag),
+  }
+  async editIssue(
+    number: number,
+    body: string,
+    writer?: Writer,
+    source?: Message,
+  ) {
+    await this.userWrite(
+      source?.authorId ?? writer?.discordId,
+      writer,
+      async (api) => {
+        await api.issues.update({
+          ...this.repo,
+          issue_number: number,
+          body: this.signed(
+            body,
+            "thread",
+            body.match(/<!-- gd-sync:thread:(\d+) -->/)?.[1],
+            writer,
+          ),
+        });
+      },
     );
-    const { data } = await this.github.issues.create({
-      ...this.repo,
-      title: post.title,
-      body: `${sourceBody(post.starter)}\n\n${marker}`,
-      labels,
-    });
-    return this.issue(data);
   }
-  async editIssue(number: number, body: string) {
-    await this.github.issues.update({
-      ...this.repo,
-      issue_number: number,
-      body,
-    });
-  }
-  async state(number: number, state: "open" | "closed") {
-    await this.github.issues.update({
-      ...this.repo,
-      issue_number: number,
-      state,
+  async state(number: number, state: "open" | "closed", actor?: string) {
+    await this.userWrite(actor, undefined, async (api) => {
+      await api.issues.update({ ...this.repo, issue_number: number, state });
     });
   }
   async comments(number: number): Promise<Comment[]> {
@@ -144,24 +241,54 @@ export class LivePlatforms implements Platforms {
       author: c.user?.login ?? "unknown",
       url: c.html_url,
       own: c.user?.login === this.githubLogin,
+      authorId: c.user?.id === undefined ? undefined : String(c.user.id),
+      relay: this.authorship?.verify(
+        c.body ?? "",
+        String(c.user?.id ?? ""),
+        `${this.options.owner}/${this.options.repo}`,
+      ),
     }));
   }
-  async createComment(number: number, body: string) {
-    return String(
-      (
-        await this.github.issues.createComment({
+  async createComment(number: number, body: string, source?: Message) {
+    return this.userWrite(source?.authorId, undefined, async (api, writer) => {
+      const response = await api.issues.createComment({
+        ...this.repo,
+        issue_number: number,
+        body: this.signed(body, "message", source?.id, writer),
+      });
+      return { id: String(response.data.id), writer };
+    });
+  }
+  async editComment(
+    id: string,
+    body: string,
+    writer?: Writer,
+    source?: Message,
+  ) {
+    await this.userWrite(
+      source?.authorId ?? writer?.discordId,
+      writer,
+      async (api) => {
+        await api.issues.updateComment({
           ...this.repo,
-          issue_number: number,
-          body,
-        })
-      ).data.id,
+          comment_id: Number(id),
+          body: this.signed(
+            body,
+            "message",
+            body.match(/<!-- gd-sync:message:(\d+) -->/)?.[1],
+            writer,
+          ),
+        });
+      },
     );
   }
-  async editComment(id: string, body: string) {
-    await this.github.issues.updateComment({
-      ...this.repo,
-      comment_id: Number(id),
-      body,
+  async notifyBlocked(source: Message, message: string) {
+    if (!source.authorId || !/^\d+$/.test(source.authorId)) return;
+    const channel = await this.channel(source.thread);
+    if (channel.archived) return;
+    await channel.send({
+      content: `<@${source.authorId}> ${message}`,
+      allowedMentions: { parse: [], users: [source.authorId] },
     });
   }
   private async channel(id: string): Promise<ThreadChannel> {
@@ -222,6 +349,8 @@ export class LivePlatforms implements Platforms {
       body,
       url: message.url,
       author: message.author.globalName ?? message.author.username,
+      authorId: message.author.id,
+      createdAt: message.createdAt?.toISOString(),
       bot: message.author.bot || Boolean(message.webhookId),
       own: message.author.id === this.client.user?.id,
     };

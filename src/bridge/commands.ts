@@ -7,7 +7,11 @@ export async function issueCommand(
   interaction: ChatInputCommandInteraction,
   store: Store,
   api: Pick<Platforms, "getIssue">,
-  options: { forum: string; roles: string[] },
+  options: {
+    forum: string;
+    roles: string[];
+    authorize?: (id: string) => Promise<boolean>;
+  },
 ) {
   await interaction.deferReply({ ephemeral: true });
   const member = await interaction.guild!.members.fetch(interaction.user.id);
@@ -45,10 +49,17 @@ export async function issueCommand(
     );
     return;
   }
+  if (options.authorize && !(await options.authorize(interaction.user.id))) {
+    await interaction.editReply(
+      "Run /github link and /github confirm before changing an issue on GitHub.",
+    );
+    return;
+  }
   // Acknowledge success only after SQLite commits the authorized command.
   store.enqueue(
     {
       type: "state",
+      actor: interaction.user.id,
       issue: link.issue,
       state: action === "close" ? "closed" : "open",
     },

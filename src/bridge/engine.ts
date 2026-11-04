@@ -1,3 +1,4 @@
+import { WriteBlocked } from "./authorship";
 import { Store } from "./database";
 import {
   chunks,
@@ -29,10 +30,20 @@ export class Engine {
       case "state": {
         const link = this.store.link(task.issue);
         if (!link || link.disabled) return;
-        await this.api.state(task.issue, task.state);
-        return this.github(task.issue);
+        try {
+          if (task.actor)
+            await this.api.state(task.issue, task.state, task.actor);
+          else await this.api.state(task.issue, task.state);
+          this.store.unblock(`state:${task.issue}`);
+          return this.github(task.issue);
+        } catch (error) {
+          await this.hold(error, `state:${task.issue}`, undefined, link.thread);
+          throw error;
+        }
+        return;
       }
       case "unlink": {
+        this.store.clearBlocked(task.thread);
         const link = this.store.thread(task.thread);
         if (link) this.store.saveLink({ ...link, disabled: true });
       }
@@ -92,8 +103,11 @@ export class Engine {
       if (!this.backfill && issue.createdAt < this.store.meta("started")!)
         return;
       // Recover a successful Discord→GitHub create whose response/database write was interrupted.
-      const source =
-        issue.own && issue.body.match(/<!-- gd-sync:thread:(\d+) -->/);
+      const sourceId =
+        issue.relay?.kind === "thread" ? issue.relay.sourceId : undefined;
+      const source = sourceId
+        ? ["", sourceId]
+        : issue.own && issue.body.match(/<!-- gd-sync:thread:(\d+) -->/);
       if (source) {
         const post = await this.api.getPost(source[1]);
         link = {
@@ -101,6 +115,7 @@ export class Engine {
           thread: post.id,
           starter: post.starter.id,
           origin: "discord",
+          writer: issue.relay?.writer,
         };
       } else {
         // Recover a successful forum create before retrying it. Include archived threads.
@@ -132,7 +147,10 @@ export class Engine {
       const comments = await this.api.comments(number);
       for (const comment of comments) {
         // Identity plus persisted mappings prevent echoes. A pasted Discord URL is not an echo.
-        if (comment.own && /<!-- gd-sync:message:\d+ -->/.test(comment.body))
+        if (
+          comment.relay ||
+          (comment.own && /<!-- gd-sync:message:\d+ -->/.test(comment.body))
+        )
           continue;
         if (
           this.store
@@ -246,6 +264,35 @@ export class Engine {
     this.store.saveMirror(mirror);
   }
 
+  private async hold(
+    error: unknown,
+    key: string,
+    source?: Message,
+    thread?: string,
+  ) {
+    if (!(error instanceof WriteBlocked)) return false;
+    this.store.block(
+      key,
+      error.discordId ?? source?.authorId,
+      error.reason,
+      source?.thread ?? thread,
+    );
+    const noticeKey = `link-notice:${source?.thread}:${source?.authorId}`;
+    if (
+      source?.createdAt &&
+      Date.now() - Date.parse(source.createdAt) < 10 * 60_000 &&
+      Date.now() - Number(this.store.meta(noticeKey) ?? 0) > 10 * 60_000
+    ) {
+      try {
+        await this.api.notifyBlocked?.(source, error.message);
+        this.store.setMeta(noticeKey, String(Date.now()));
+      } catch {
+        /* A missing notification permission must not lose the held change. */
+      }
+    }
+    return true;
+  }
+
   async discord(thread: string) {
     let link = this.store.thread(thread);
     if (link?.disabled) return;
@@ -254,6 +301,7 @@ export class Engine {
       post = await this.api.getPost(thread);
     } catch (error) {
       if (missing(error)) {
+        this.store.clearBlocked(thread);
         if (link) this.store.saveLink({ ...link, disabled: true });
         return;
       }
@@ -263,14 +311,24 @@ export class Engine {
       if (post.starter.bot) return;
       const marker = issueMarker(thread);
       const existing = (await this.api.issues()).find(
-        (i) => i.own && i.body.includes(marker),
+        (i) =>
+          (i.relay?.kind === "thread" && i.relay.sourceId === thread) ||
+          (i.own && i.body.includes(marker)),
       );
-      const issue = existing ?? (await this.api.createIssue(post, marker));
+      let issue: Issue;
+      try {
+        issue = existing ?? (await this.api.createIssue(post, marker));
+        this.store.unblock(`issue:${thread}`);
+      } catch (error) {
+        if (await this.hold(error, `issue:${thread}`, post.starter)) return;
+        throw error;
+      }
       link = {
         issue: issue.number,
         thread,
         starter: post.starter.id,
         origin: "discord",
+        writer: issue.writer ?? issue.relay?.writer,
       };
       this.store.saveLink(link);
     }
@@ -278,39 +336,55 @@ export class Engine {
       const body = `${sourceBody(post.starter)}\n\n${issueMarker(thread)}`;
       const key = `body:${thread}`;
       if (this.store.meta(key) !== hash(body)) {
-        await this.api.editIssue(link.issue, body);
-        this.store.setMeta(key, hash(body));
+        try {
+          await this.api.editIssue(link.issue, body, link.writer, post.starter);
+          this.store.setMeta(key, hash(body));
+          this.store.unblock(key);
+        } catch (error) {
+          if (!(await this.hold(error, key, post.starter))) throw error;
+        }
       }
     }
     const messages = await this.api.messages(thread);
     let comments: Awaited<ReturnType<Platforms["comments"]>> | undefined;
     const sourceIds = new Set(messages.filter((m) => !m.bot).map((m) => m.id));
+    this.store.clearBlocked(thread, sourceIds);
     for (const message of messages) {
       if (message.bot || message.id === link.starter) continue;
       const key = `discord:${message.id}`;
       const body = `${sourceBody(message)}\n\n${messageMarker(message.id)}`;
       let mirror = this.store.mirror(key);
       if (mirror?.hash === hash(body)) continue;
-      if (!mirror) {
-        comments ??= await this.api.comments(link.issue);
-        const recovered = comments.find(
-          (c) => c.own && c.body.includes(messageMarker(message.id)),
-        );
-        const id =
-          recovered?.id ?? (await this.api.createComment(link.issue, body));
-        mirror = {
-          key,
-          issue: link.issue,
-          origin: "discord",
-          source: message.id,
-          ids: [id],
-          hash: "",
-        };
+      try {
+        if (!mirror) {
+          comments ??= await this.api.comments(link.issue);
+          const recovered = comments.find(
+            (c) =>
+              (c.relay?.kind === "message" &&
+                c.relay.sourceId === message.id) ||
+              (c.own && c.body.includes(messageMarker(message.id))),
+          );
+          const created = recovered
+            ? { id: recovered.id, writer: recovered.relay?.writer }
+            : await this.api.createComment(link.issue, body, message);
+          mirror = {
+            key,
+            issue: link.issue,
+            origin: "discord",
+            source: message.id,
+            ids: [typeof created === "string" ? created : created.id],
+            hash: "",
+            writer: typeof created === "string" ? undefined : created.writer,
+          };
+          this.store.saveMirror(mirror);
+        }
+        await this.api.editComment(mirror.ids[0], body, mirror.writer, message);
+        mirror.hash = hash(body);
         this.store.saveMirror(mirror);
+        this.store.unblock(key);
+      } catch (error) {
+        if (!(await this.hold(error, key, message))) throw error;
       }
-      await this.api.editComment(mirror.ids[0], body);
-      mirror.hash = hash(body);
-      this.store.saveMirror(mirror);
     }
     for (const mirror of this.store.mirrors(link.issue)) {
       if (
@@ -323,10 +397,16 @@ export class Engine {
         await this.api.editComment(
           mirror.ids[0],
           `_(This message was deleted on Discord.)_\n\n${messageMarker(mirror.source)}`,
+          mirror.writer,
         );
       } catch (error) {
+        if (
+          await this.hold(error, `delete:${mirror.source}`, undefined, thread)
+        )
+          continue;
         if (!missing(error)) throw error;
       }
+      this.store.unblock(`delete:${mirror.source}`);
       mirror.hash = "deleted";
       this.store.saveMirror(mirror);
     }

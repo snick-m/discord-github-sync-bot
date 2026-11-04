@@ -72,6 +72,7 @@ describe("issue command permissions", () => {
       await run();
       expect(store.next()?.task).toEqual({
         type: "state",
+        actor: "user",
         issue: 42,
         state: "closed",
       });
@@ -92,6 +93,7 @@ describe("issue command permissions", () => {
     await run();
     expect(store.next()?.task).toEqual({
       type: "state",
+      actor: "user",
       issue: 42,
       state: "open",
     });

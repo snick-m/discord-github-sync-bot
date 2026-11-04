@@ -16,6 +16,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS mirrors_issue ON mirrors(json_extract(data,'$.issue'));
       CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, key TEXT UNIQUE NOT NULL, payload TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0, error TEXT, failed INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS blocked(source TEXT PRIMARY KEY,discord TEXT,reason TEXT NOT NULL,updated INTEGER NOT NULL,thread TEXT);
       CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, received_at INTEGER NOT NULL);`);
     const existing = this.meta("scope");
     if (existing && existing !== scope) {
@@ -137,11 +138,40 @@ export class Store {
         "SELECT SUM(failed=0) AS pending, SUM(failed=1) AS failed, MAX(attempts) AS maxAttempts FROM jobs",
       )
       .get()!;
+    const held = this.db.prepare("SELECT COUNT(*) AS n FROM blocked").get()!;
     return {
+      blocked: Number(held.n),
       pending: Number(row.pending ?? 0),
       failed: Number(row.failed ?? 0),
       maxAttempts: Number(row.maxAttempts ?? 0),
     };
+  }
+  block(
+    source: string,
+    discord: string | undefined,
+    reason: string,
+    thread?: string,
+  ) {
+    this.db
+      .prepare(
+        "INSERT INTO blocked VALUES (?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET discord=excluded.discord,reason=excluded.reason,updated=excluded.updated,thread=excluded.thread",
+      )
+      .run(source, discord ?? null, reason, Date.now(), thread ?? null);
+  }
+  unblock(source: string) {
+    this.db.prepare("DELETE FROM blocked WHERE source=?").run(source);
+  }
+  clearBlocked(thread: string, sourceIds?: Set<string>) {
+    for (const row of this.db
+      .prepare("SELECT source FROM blocked WHERE thread=?")
+      .all(thread)) {
+      const key = String(row.source);
+      if (
+        !sourceIds ||
+        (key.startsWith("discord:") && !sourceIds.has(key.slice(8)))
+      )
+        this.unblock(key);
+    }
   }
   prune() {
     this.db
