@@ -1,5 +1,5 @@
 import express, { Request, Response } from "express";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { ManagementStore } from "./store";
 import { Runtime } from "./runtime";
 import { validateDiscord, validateGithub } from "./providers";
@@ -69,8 +69,7 @@ export function createManagementServer(
       "X-Content-Type-Options": "nosniff",
       "X-Frame-Options": "DENY",
       "Referrer-Policy": "no-referrer",
-      "Content-Security-Policy":
-        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+      "Content-Security-Policy": `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'${!options.bootstrap && req.path === "/auth/github/start" ? " https://github.com/login/oauth/authorize" : ""}; base-uri 'none'; frame-ancestors 'none'`,
     });
     if (options.bootstrap && !loopback(req.hostname)) {
       res.status(403).json({
@@ -104,16 +103,25 @@ export function createManagementServer(
           "Link expired or invalid. Return to Discord and run /github link again.",
         );
     // GET/HEAD requests may be made by Discord previews and link scanners.
-    // Only a same-origin form submission consumes the single-use ticket.
+    // Only a browser-bound, signed form submission consumes the single-use ticket.
     app.get("/auth/github/start", (req, res) => {
       try {
         const ticket = String(req.query.ticket ?? "");
         accounts.validateStart(ticket);
+        const nonce = randomBytes(32).toString("base64url");
+        const formToken = `${nonce}.${store.sign(`oauth-start:${ticket}:${nonce}`)}`;
+        res.cookie("bridge_link_start", formToken, {
+          httpOnly: true,
+          secure: true,
+          sameSite: "lax",
+          path: "/auth/github",
+          maxAge: 600_000,
+        });
         // validateStart permits only a fixed-length base64url value, safe in this attribute.
         res
           .type("html")
           .send(
-            `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Link GitHub account</title><link rel="stylesheet" href="/style.css"><main><section class="panel"><h1>Link your GitHub account.</h1><p>Continue to GitHub to authorize your account, then return to Discord and run <strong>/github confirm</strong>.</p><form method="post" action="/auth/github/start"><input type="hidden" name="ticket" value="${ticket}"><button type="submit">Continue to GitHub</button></form></section></main></html>`,
+            `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Link GitHub account</title><link rel="stylesheet" href="/style.css"><main><section class="panel"><h1>Link your GitHub account.</h1><p>Continue to GitHub to authorize your account, then return to Discord and run <strong>/github confirm</strong>.</p><form method="post" action="/auth/github/start"><input type="hidden" name="ticket" value="${ticket}"><input type="hidden" name="formToken" value="${formToken}"><button type="submit">Continue to GitHub</button></form></section></main></html>`,
           );
       } catch {
         invalidLink(res);
@@ -123,27 +131,55 @@ export function createManagementServer(
       "/auth/github/start",
       express.urlencoded({ extended: false, limit: "2kb" }),
       (req, res) => {
-        let origin: URL;
-        try {
-          origin = new URL(req.get("origin") ?? "");
-        } catch {
+        const ticket = String(req.body?.ticket ?? "");
+        const formToken = String(req.body?.formToken ?? "");
+        const cookieToken =
+          (req.get("cookie") ?? "")
+            .split(";")
+            .map((v) => v.trim())
+            .find((v) => v.startsWith("bridge_link_start="))
+            ?.slice("bridge_link_start=".length) ?? "";
+        const match = formToken.match(/^([a-zA-Z0-9_-]{43})\.([a-f0-9]{64})$/);
+        if (
+          !match ||
+          cookieToken !== formToken ||
+          !timingSafeEqual(
+            Buffer.from(match[2]),
+            Buffer.from(store.sign(`oauth-start:${ticket}:${match[1]}`)),
+          )
+        ) {
           res
             .status(403)
             .type("text")
             .send(
-              "Request origin could not be verified. Open the link from Discord again.",
+              "The confirmation page expired. Reopen your Discord link and try again.",
             );
           return;
         }
-        if (
-          origin.host !== req.get("host") ||
-          !["http:", "https:"].includes(origin.protocol)
-        ) {
-          res.status(403).type("text").send("Cross-origin request rejected.");
-          return;
+        // no-referrer and privacy browsers may legitimately send Origin: null.
+        // The signed form token and HttpOnly cookie remain required in every case.
+        const originHeader = req.get("origin");
+        if (originHeader && originHeader !== "null") {
+          try {
+            const origin = new URL(originHeader);
+            if (
+              origin.host !== req.get("host") ||
+              !["http:", "https:"].includes(origin.protocol)
+            )
+              throw new Error("origin");
+          } catch {
+            res.status(403).type("text").send("Cross-origin request rejected.");
+            return;
+          }
         }
         try {
-          const result = accounts.start(String(req.body?.ticket ?? ""));
+          const result = accounts.start(ticket);
+          res.clearCookie("bridge_link_start", {
+            httpOnly: true,
+            secure: true,
+            sameSite: "lax",
+            path: "/auth/github",
+          });
           oauthCookie(res, result.browser);
           res.redirect(303, result.url);
         } catch {

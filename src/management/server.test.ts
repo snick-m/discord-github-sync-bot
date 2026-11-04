@@ -119,26 +119,27 @@ describe("management API", () => {
     const { publicApp, headers, accounts } = setup();
     accounts.saveApp("Iv1.testclient", "test-app", "private-client-secret");
     const startUrl = new URL(accounts.begin("123"));
+    let formToken = "",
+      cookie = "";
     for (let i = 0; i < 3; i++) {
       const landing = await request(publicApp)
         .get(startUrl.pathname + startUrl.search)
         .set(headers);
       expect(landing.status).toBe(200);
       expect(landing.text).toContain("Continue to GitHub");
-      expect(landing.headers["set-cookie"]).toBeUndefined();
+      expect(landing.headers["content-security-policy"]).toContain(
+        "form-action 'self' https://github.com/login/oauth/authorize;",
+      );
+      formToken = landing.text.match(/name="formToken" value="([^"]+)"/)![1];
+      cookie = landing.headers["set-cookie"][0].split(";")[0];
     }
-    expect(
-      (
-        await request(publicApp)
-          .head(startUrl.pathname + startUrl.search)
-          .set(headers)
-      ).status,
-    ).toBe(200);
     const response = await request(publicApp)
       .post("/auth/github/start")
       .set(headers)
+      .set("Origin", "null")
+      .set("Cookie", cookie)
       .type("form")
-      .send({ ticket: startUrl.searchParams.get("ticket") });
+      .send({ ticket: startUrl.searchParams.get("ticket"), formToken });
     expect(response.status).toBe(303);
     expect(response.headers.location).toMatch(
       /^https:\/\/github.com\/login\/oauth\/authorize\?/,
@@ -162,21 +163,43 @@ describe("management API", () => {
     accounts.saveApp("Iv1.testclient", "test-app", "private-client-secret");
     const url = new URL(accounts.begin("123"));
     const ticket = url.searchParams.get("ticket");
+    const landing = await request(publicApp)
+      .get(url.pathname + url.search)
+      .set(headers);
+    const formToken = landing.text.match(
+      /name="formToken" value="([^"]+)"/,
+    )![1];
+    const cookie = landing.headers["set-cookie"][0].split(";")[0];
     const post = () =>
-      request(publicApp).post("/auth/github/start").set(headers).type("form");
+      request(publicApp)
+        .post("/auth/github/start")
+        .set(headers)
+        .set("Cookie", cookie)
+        .type("form");
     expect(
-      (await post().set("Origin", "https://other.example").send({ ticket }))
-        .status,
+      (
+        await post()
+          .set("Origin", "https://other.example")
+          .send({ ticket, formToken })
+      ).status,
     ).toBe(403);
+    expect((await post().send({ ticket, formToken: "forged" })).status).toBe(
+      403,
+    );
     expect(
       (
         await request(publicApp)
-          .get(url.pathname + url.search)
+          .post("/auth/github/start")
           .set(headers)
+          .type("form")
+          .send({ ticket, formToken })
       ).status,
-    ).toBe(200);
+    ).toBe(403);
+    expect(
+      (await post().send({ ticket: "different-ticket", formToken })).status,
+    ).toBe(403);
     store.db.exec("UPDATE github_attempts SET expires=0");
-    expect((await post().send({ ticket })).status).toBe(400);
+    expect((await post().send({ ticket, formToken })).status).toBe(400);
   });
   it("accepts signed authorization revocations without a repository and rejects forged ones", async () => {
     const { publicApp, headers, accounts, store } = setup();
