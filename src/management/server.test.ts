@@ -81,6 +81,28 @@ afterEach(() => {
   }
 });
 describe("management API", () => {
+  it("preserves leading and trailing spaces when signing in with an environment-created password", async () => {
+    const { store, publicApp, headers } = setup();
+    const password = "  environment password  ";
+    store.createAdmin(password);
+    expect(
+      (
+        await request(publicApp)
+          .post("/api/login")
+          .set(headers)
+          .send({ password })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await request(publicApp)
+          .post("/api/login")
+          .set(headers)
+          .send({ password: password.trim() })
+      ).status,
+    ).toBe(401);
+  });
+
   it("rejects forged webhooks and ignores paused or unmapped repositories", async () => {
     const { store, publicApp, headers } = setup();
     store.saveSecret("webhook", "shared-webhook-secret");

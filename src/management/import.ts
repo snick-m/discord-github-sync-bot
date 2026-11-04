@@ -3,6 +3,18 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { ManagementStore } from "./store";
 
+/** Seed the first administrator only; later restarts never replace an existing password. */
+export function initializeAdmin(store: ManagementStore, env = process.env) {
+  const password = env.ADMIN_PASSWORD;
+  if (store.hasAdmin() || !password?.trim()) return false;
+  if (password.length < 12 || password.length > 256)
+    throw new Error(
+      "ADMIN_PASSWORD must contain between 12 and 256 characters.",
+    );
+  store.createAdmin(password);
+  return true;
+}
+
 /** Import legacy .env settings once, without modifying the user's environment file. */
 export function importLegacy(store: ManagementStore, env = process.env) {
   if (env.DISCORD_TOKEN && !store.secret("discord"))

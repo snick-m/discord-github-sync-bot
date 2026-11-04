@@ -2,12 +2,13 @@ import { settings } from "./bridge/settings";
 import { ManagementStore } from "./management/store";
 import { Runtime } from "./management/runtime";
 import { createManagementServer } from "./management/server";
-import { importLegacy } from "./management/import";
+import { importLegacy, initializeAdmin } from "./management/import";
 
 async function main() {
   process.umask(0o077);
   const options = settings();
   const store = new ManagementStore(options.directory);
+  initializeAdmin(store);
   importLegacy(store);
   const runtime = new Runtime(store, options.interval);
   const publicServer = createManagementServer(store, runtime, {
@@ -48,7 +49,7 @@ async function main() {
   );
   if (!store.hasAdmin())
     console.log(
-      "Administrator not configured. Complete initial setup through an SSH tunnel to the private setup port.",
+      "Administrator not configured. Set ADMIN_PASSWORD and restart, or use the private setup page.",
     );
 }
 main().catch((error) => {

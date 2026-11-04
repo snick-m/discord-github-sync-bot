@@ -29,12 +29,13 @@ const field = (
   key: string,
   optional = false,
   max = 100,
+  trim = true,
 ) => {
   const value = body[key];
   if (optional && (value === undefined || value === "")) return "";
   if (typeof value !== "string" || !value.trim() || value.length > max)
     throw new PublicError(`Invalid ${key}.`);
-  return value.trim();
+  return trim ? value.trim() : value;
 };
 const roles = (value: unknown) => {
   if (value === undefined || value === "") return [];
@@ -247,7 +248,7 @@ export function createManagementServer(
         );
       if (store.hasAdmin())
         throw new PublicError("An administrator already exists.", 409);
-      const password = field(req.body, "password", false, 256);
+      const password = field(req.body, "password", false, 256, false);
       if (password.length < 12)
         throw new PublicError("Use a password of at least 12 characters.");
       store.createAdmin(password);
@@ -268,7 +269,7 @@ export function createManagementServer(
           "Too many attempts. Try again in 15 minutes.",
           429,
         );
-      const password = field(req.body, "password", false, 256);
+      const password = field(req.body, "password", false, 256, false);
       if (!store.authenticate(password)) {
         const current =
           previous && previous.until > Date.now()

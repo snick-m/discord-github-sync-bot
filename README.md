@@ -25,9 +25,13 @@ A PAT still belongs to a user and actions appear under that user's identity. A G
 
 ## Initial administrator setup
 
-There is no default administrator password. Public first-time registration is disabled. Create your administrator through the private setup listener on `127.0.0.1:5001`, then sign in through your normal HTTPS hostname.
+There is no default administrator password. The simplest setup is to set `ADMIN_PASSWORD` in `.env` (12–256 characters), restart the application, and sign in directly through your normal HTTPS hostname. In the deployed LXC, edit `/etc/discord-github-sync/.env` and run `systemctl restart discord-github-sync`.
 
-For the deployed Proxmox LXC, forward the private setup port from your own computer:
+`ADMIN_PASSWORD` initializes the first administrator only. Once an account exists, the variable is ignored and cannot silently change its password on later restarts. The application stores only the password hash. After successful setup, remove the plaintext value from `.env`; the account continues to work. For a deliberate password reset, use the CLI described below.
+
+If you leave `ADMIN_PASSWORD` unset, private browser setup remains available. Public first-time registration is always disabled.
+
+To use the optional private browser setup in the deployed Proxmox LXC, forward its setup port from your own computer:
 
 ```sh
 ssh -N -J root@server -L 5001:127.0.0.1:5001 root@10.20.84.190

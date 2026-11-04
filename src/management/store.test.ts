@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { ManagementStore, Mapping } from "./store";
 import { Store } from "../bridge/database";
-import { importLegacy } from "./import";
+import { importLegacy, initializeAdmin } from "./import";
 const resources: { store: ManagementStore; directory: string }[] = [];
 function setup() {
   const directory = mkdtempSync(path.join(tmpdir(), "manager-"));
@@ -19,6 +19,41 @@ afterEach(() => {
   }
 });
 describe("management persistence", () => {
+  it("initializes the first administrator from ADMIN_PASSWORD and stores only its hash", () => {
+    const { store } = setup();
+    const password = "  environment admin password  ";
+    expect(initializeAdmin(store, { ADMIN_PASSWORD: password })).toBe(true);
+    expect(store.authenticate(password)).toBe(true);
+    expect(store.get("admin")).not.toContain(password);
+  });
+  it("never replaces an existing administrator or invalidates sessions on restart", () => {
+    const { store } = setup();
+    initializeAdmin(store, { ADMIN_PASSWORD: "original-password" });
+    const session = store.session();
+    expect(
+      initializeAdmin(store, { ADMIN_PASSWORD: "replacement-password" }),
+    ).toBe(false);
+    expect(store.authenticate("original-password")).toBe(true);
+    expect(store.authenticate("replacement-password")).toBe(false);
+    expect(store.validSession(session)).toBe(true);
+  });
+  it("leaves setup available when ADMIN_PASSWORD is unset or blank", () => {
+    const { store } = setup();
+    expect(initializeAdmin(store, {})).toBe(false);
+    expect(initializeAdmin(store, { ADMIN_PASSWORD: "" })).toBe(false);
+    expect(store.hasAdmin()).toBe(false);
+  });
+  it("rejects invalid environment passwords without disclosing them or creating an admin", () => {
+    const { store } = setup();
+    expect(() => initializeAdmin(store, { ADMIN_PASSWORD: "short" })).toThrow(
+      "ADMIN_PASSWORD must contain",
+    );
+    expect(() =>
+      initializeAdmin(store, { ADMIN_PASSWORD: "x".repeat(257) }),
+    ).toThrow("ADMIN_PASSWORD must contain");
+    expect(store.hasAdmin()).toBe(false);
+  });
+
   it("encrypts saved tokens and never includes them in credential metadata", () => {
     const { store, directory } = setup();
     const token = "github_pat_private_test_value";
