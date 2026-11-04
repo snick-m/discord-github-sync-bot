@@ -96,20 +96,61 @@ export function createManagementServer(
         "Set-Cookie",
         `bridge_oauth=${value}; Path=/auth/github; HttpOnly; Secure; SameSite=Lax; Max-Age=${age}`,
       );
+    const invalidLink = (res: Response) =>
+      res
+        .status(400)
+        .type("text")
+        .send(
+          "Link expired or invalid. Return to Discord and run /github link again.",
+        );
+    // GET/HEAD requests may be made by Discord previews and link scanners.
+    // Only a same-origin form submission consumes the single-use ticket.
     app.get("/auth/github/start", (req, res) => {
       try {
-        const result = accounts.start(String(req.query.ticket ?? ""));
-        oauthCookie(res, result.browser);
-        res.redirect(result.url);
-      } catch {
+        const ticket = String(req.query.ticket ?? "");
+        accounts.validateStart(ticket);
+        // validateStart permits only a fixed-length base64url value, safe in this attribute.
         res
-          .status(400)
-          .type("text")
+          .type("html")
           .send(
-            "Link expired or invalid. Return to Discord and run /github link again.",
+            `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Link GitHub account</title><link rel="stylesheet" href="/style.css"><main><section class="panel"><h1>Link your GitHub account.</h1><p>Continue to GitHub to authorize your account, then return to Discord and run <strong>/github confirm</strong>.</p><form method="post" action="/auth/github/start"><input type="hidden" name="ticket" value="${ticket}"><button type="submit">Continue to GitHub</button></form></section></main></html>`,
           );
+      } catch {
+        invalidLink(res);
       }
     });
+    app.post(
+      "/auth/github/start",
+      express.urlencoded({ extended: false, limit: "2kb" }),
+      (req, res) => {
+        let origin: URL;
+        try {
+          origin = new URL(req.get("origin") ?? "");
+        } catch {
+          res
+            .status(403)
+            .type("text")
+            .send(
+              "Request origin could not be verified. Open the link from Discord again.",
+            );
+          return;
+        }
+        if (
+          origin.host !== req.get("host") ||
+          !["http:", "https:"].includes(origin.protocol)
+        ) {
+          res.status(403).type("text").send("Cross-origin request rejected.");
+          return;
+        }
+        try {
+          const result = accounts.start(String(req.body?.ticket ?? ""));
+          oauthCookie(res, result.browser);
+          res.redirect(303, result.url);
+        } catch {
+          invalidLink(res);
+        }
+      },
+    );
     app.get("/auth/github/callback", async (req, res) => {
       const browser =
         (req.get("cookie") ?? "")

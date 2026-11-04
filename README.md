@@ -27,7 +27,7 @@ Register a GitHub App under your organization or account and install it on the s
 
 Enter the App’s **client ID**, **slug**, and **client secret** in the dashboard’s account-linking section. The secret and member tokens are encrypted at rest and never returned by the API. Changing the client ID requires members to authorize again.
 
-Each member runs `/github link`, opens the private single-use URL, authorizes on GitHub, then runs `/github confirm` and confirms the displayed GitHub account in Discord. `/github status` shows their link; `/github unlink` deletes their local tokens and pending authorizations. Members can also revoke access in GitHub settings. A GitHub identity may be linked to only one Discord identity.
+Each member runs `/github link`, opens the private single-use URL, clicks **Continue to GitHub**, authorizes on GitHub, then runs `/github confirm` and confirms the displayed GitHub account in Discord. `/github status` shows their link; `/github unlink` deletes their local tokens and pending authorizations. Members can also revoke access in GitHub settings. A GitHub identity may be linked to only one Discord identity.
 
 **There is no shared-token fallback for Discord → GitHub.** New issues, comments, edits, deletion tombstones, and close/reopen actions require the appropriate linked user token and GitHub permissions. Expired, revoked, missing, or unauthorized credentials hold the change. Messages remain in Discord, recent messages get a rate-limited linking notice, and held counts appear in the dashboard. Linking triggers a recovery scan; only surviving source messages are sent. GitHub → Discord continues for GitHub contributors without Discord links. Reactions are not synced.
 

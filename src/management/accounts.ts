@@ -184,7 +184,7 @@ export class GitHubAccounts implements Authorship {
       .run(id, discord, Date.now() + lifetime);
     return `${this.publicUrl}/auth/github/start?ticket=${ticket}`;
   }
-  start(ticket: string) {
+  validateStart(ticket: string) {
     if (!/^[a-zA-Z0-9_-]{43}$/.test(ticket))
       throw new Error("Invalid account-link request.");
     this.prune();
@@ -194,6 +194,10 @@ export class GitHubAccounts implements Authorship {
       .get(id) as unknown as Attempt | undefined;
     if (!attempt || attempt.stage !== "new" || !this.app().configured)
       throw new Error("Account-link request expired or already used.");
+  }
+  start(ticket: string) {
+    this.validateStart(ticket);
+    const id = hash(ticket);
     const state = opaque(),
       browser = opaque(),
       verifier = opaque(),

@@ -119,10 +119,27 @@ describe("management API", () => {
     const { publicApp, headers, accounts } = setup();
     accounts.saveApp("Iv1.testclient", "test-app", "private-client-secret");
     const startUrl = new URL(accounts.begin("123"));
+    for (let i = 0; i < 3; i++) {
+      const landing = await request(publicApp)
+        .get(startUrl.pathname + startUrl.search)
+        .set(headers);
+      expect(landing.status).toBe(200);
+      expect(landing.text).toContain("Continue to GitHub");
+      expect(landing.headers["set-cookie"]).toBeUndefined();
+    }
+    expect(
+      (
+        await request(publicApp)
+          .head(startUrl.pathname + startUrl.search)
+          .set(headers)
+      ).status,
+    ).toBe(200);
     const response = await request(publicApp)
-      .get(startUrl.pathname + startUrl.search)
-      .set(headers);
-    expect(response.status).toBe(302);
+      .post("/auth/github/start")
+      .set(headers)
+      .type("form")
+      .send({ ticket: startUrl.searchParams.get("ticket") });
+    expect(response.status).toBe(303);
     expect(response.headers.location).toMatch(
       /^https:\/\/github.com\/login\/oauth\/authorize\?/,
     );
@@ -139,6 +156,27 @@ describe("management API", () => {
     expect(
       (await request(publicApp).get("/api/state").set(headers)).status,
     ).toBe(401);
+  });
+  it("rejects cross-origin link consumption and expired tickets", async () => {
+    const { publicApp, headers, accounts, store } = setup();
+    accounts.saveApp("Iv1.testclient", "test-app", "private-client-secret");
+    const url = new URL(accounts.begin("123"));
+    const ticket = url.searchParams.get("ticket");
+    const post = () =>
+      request(publicApp).post("/auth/github/start").set(headers).type("form");
+    expect(
+      (await post().set("Origin", "https://other.example").send({ ticket }))
+        .status,
+    ).toBe(403);
+    expect(
+      (
+        await request(publicApp)
+          .get(url.pathname + url.search)
+          .set(headers)
+      ).status,
+    ).toBe(200);
+    store.db.exec("UPDATE github_attempts SET expires=0");
+    expect((await post().send({ ticket })).status).toBe(400);
   });
   it("accepts signed authorization revocations without a repository and rejects forged ones", async () => {
     const { publicApp, headers, accounts, store } = setup();
