@@ -4,6 +4,7 @@ import { ManagementStore } from "./store";
 import { Runtime } from "./runtime";
 import { validateDiscord, validateGithub } from "./providers";
 import { verifySignature } from "../webhookSignature";
+import { linkPage, linkCss } from "./linkPages";
 import { html, css, js } from "./ui";
 
 import { GitHubAccounts } from "./accounts";
@@ -98,10 +99,8 @@ export function createManagementServer(
     const invalidLink = (res: Response) =>
       res
         .status(400)
-        .type("text")
-        .send(
-          "Link expired or invalid. Return to Discord and run /github link again.",
-        );
+        .type("html")
+        .send(linkPage({ state: "error" }));
     // GET/HEAD requests may be made by Discord previews and link scanners.
     // Only a browser-bound, signed form submission consumes the single-use ticket.
     app.get("/auth/github/start", (req, res) => {
@@ -117,12 +116,7 @@ export function createManagementServer(
           path: "/auth/github",
           maxAge: 600_000,
         });
-        // validateStart permits only a fixed-length base64url value, safe in this attribute.
-        res
-          .type("html")
-          .send(
-            `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Link GitHub account</title><link rel="stylesheet" href="/style.css"><main><section class="panel"><h1>Link your GitHub account.</h1><p>Continue to GitHub to authorize your account, then return to Discord and run <strong>/github confirm</strong>.</p><form method="post" action="/auth/github/start"><input type="hidden" name="ticket" value="${ticket}"><input type="hidden" name="formToken" value="${formToken}"><button type="submit">Continue to GitHub</button></form></section></main></html>`,
-          );
+        res.type("html").send(linkPage({ state: "start", ticket, formToken }));
       } catch {
         invalidLink(res);
       }
@@ -150,9 +144,13 @@ export function createManagementServer(
         ) {
           res
             .status(403)
-            .type("text")
+            .type("html")
             .send(
-              "The confirmation page expired. Reopen your Discord link and try again.",
+              linkPage({
+                state: "error",
+                message:
+                  "The confirmation page expired. Reopen your Discord link and try again.",
+              }),
             );
           return;
         }
@@ -168,7 +166,16 @@ export function createManagementServer(
             )
               throw new Error("origin");
           } catch {
-            res.status(403).type("text").send("Cross-origin request rejected.");
+            res
+              .status(403)
+              .type("html")
+              .send(
+                linkPage({
+                  state: "error",
+                  message:
+                    "This request could not be verified. Reopen your Discord link and try again.",
+                }),
+              );
             return;
           }
         }
@@ -196,22 +203,24 @@ export function createManagementServer(
           ?.slice(13) ?? "";
       oauthCookie(res, "", 0);
       try {
-        await accounts.callback(
+        const identity = await accounts.callback(
           String(req.query.state ?? ""),
           browser,
           String(req.query.code ?? ""),
         );
         res
           .type("html")
-          .send(
-            '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Confirm in Discord</title><link rel="stylesheet" href="/style.css"><main><section class="panel"><h1>Return to Discord.</h1><p>GitHub authorization succeeded. Run <strong>/github confirm</strong> in Discord and confirm the GitHub account shown there to finish linking.</p></section></main></html>',
-          );
+          .send(linkPage({ state: "success", login: identity.login }));
       } catch {
         res
           .status(400)
-          .type("text")
+          .type("html")
           .send(
-            "Authorization could not be verified. Return to Discord and run /github link again.",
+            linkPage({
+              state: "error",
+              message:
+                "GitHub authorization could not be verified. Return to Discord and run /github link again.",
+            }),
           );
       }
     });
@@ -313,6 +322,7 @@ export function createManagementServer(
     );
   }
   app.get("/", (_req, res) => res.type("html").send(html));
+  app.get("/link.css", (_req, res) => res.type("css").send(linkCss));
   app.get("/style.css", (_req, res) => res.type("css").send(css));
   app.get("/app.js", (_req, res) =>
     res.type("application/javascript").send(js),
